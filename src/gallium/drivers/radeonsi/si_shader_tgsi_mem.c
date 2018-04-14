@@ -1,5 +1,6 @@
 /*
  * Copyright 2017 Advanced Micro Devices, Inc.
+ * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -1506,80 +1507,10 @@ static void tex_fetch_args(
 	for (chan = 0; chan < count; chan++)
 		address[chan] = ac_to_integer(&ctx->ac, address[chan]);
 
-	/* Adjust the sample index according to FMASK.
-	 *
-	 * For uncompressed MSAA surfaces, FMASK should return 0x76543210,
-	 * which is the identity mapping. Each nibble says which physical sample
-	 * should be fetched to get that sample.
-	 *
-	 * For example, 0x11111100 means there are only 2 samples stored and
-	 * the second sample covers 3/4 of the pixel. When reading samples 0
-	 * and 1, return physical sample 0 (determined by the first two 0s
-	 * in FMASK), otherwise return physical sample 1.
-	 *
-	 * The sample index should be adjusted as follows:
-	 *   sample_index = (fmask >> (sample_index * 4)) & 0xF;
-	 */
 	if (target == TGSI_TEXTURE_2D_MSAA ||
 	    target == TGSI_TEXTURE_2D_ARRAY_MSAA) {
-		struct lp_build_emit_data txf_emit_data = *emit_data;
-		LLVMValueRef txf_address[4];
-		/* We only need .xy for non-arrays, and .xyz for arrays. */
-		unsigned txf_count = target == TGSI_TEXTURE_2D_MSAA ? 2 : 3;
-		struct tgsi_full_instruction inst = {};
-
-		memcpy(txf_address, address, sizeof(txf_address));
-
-		/* Read FMASK using TXF_LZ. */
-		inst.Instruction.Opcode = TGSI_OPCODE_TXF_LZ;
-		inst.Texture.Texture = target;
-		txf_emit_data.inst = &inst;
-		txf_emit_data.chan = 0;
-		set_tex_fetch_args(ctx, &txf_emit_data,
-				   target, fmask_ptr, NULL,
-				   txf_address, txf_count, 0xf);
-		build_tex_intrinsic(&tex_action, bld_base, &txf_emit_data);
-
-		/* Initialize some constants. */
-		LLVMValueRef four = LLVMConstInt(ctx->i32, 4, 0);
-		LLVMValueRef F = LLVMConstInt(ctx->i32, 0xF, 0);
-
-		/* Apply the formula. */
-		LLVMValueRef fmask =
-			LLVMBuildExtractElement(ctx->ac.builder,
-						txf_emit_data.output[0],
-						ctx->i32_0, "");
-
-		unsigned sample_chan = txf_count; /* the sample index is last */
-
-		LLVMValueRef sample_index4 =
-			LLVMBuildMul(ctx->ac.builder, address[sample_chan], four, "");
-
-		LLVMValueRef shifted_fmask =
-			LLVMBuildLShr(ctx->ac.builder, fmask, sample_index4, "");
-
-		LLVMValueRef final_sample =
-			LLVMBuildAnd(ctx->ac.builder, shifted_fmask, F, "");
-
-		/* Don't rewrite the sample index if WORD1.DATA_FORMAT of the FMASK
-		 * resource descriptor is 0 (invalid),
-		 */
-		LLVMValueRef fmask_desc =
-			LLVMBuildBitCast(ctx->ac.builder, fmask_ptr,
-					 ctx->v8i32, "");
-
-		LLVMValueRef fmask_word1 =
-			LLVMBuildExtractElement(ctx->ac.builder, fmask_desc,
-						ctx->i32_1, "");
-
-		LLVMValueRef word1_is_nonzero =
-			LLVMBuildICmp(ctx->ac.builder, LLVMIntNE,
-				      fmask_word1, ctx->i32_0, "");
-
-		/* Replace the MSAA sample index. */
-		address[sample_chan] =
-			LLVMBuildSelect(ctx->ac.builder, word1_is_nonzero,
-					final_sample, address[sample_chan], "");
+		ac_apply_fmask_to_sample(&ctx->ac, fmask_ptr, address,
+					 target == TGSI_TEXTURE_2D_ARRAY_MSAA);
 	}
 
 	if (opcode == TGSI_OPCODE_TXF ||
@@ -1943,6 +1874,63 @@ static void si_llvm_emit_txqs(
 	emit_data->output[emit_data->chan] = samples;
 }
 
+static void si_llvm_emit_fbfetch(const struct lp_build_tgsi_action *action,
+				 struct lp_build_tgsi_context *bld_base,
+				 struct lp_build_emit_data *emit_data)
+{
+	struct si_shader_context *ctx = si_shader_context(bld_base);
+	struct ac_image_args args = {};
+	LLVMValueRef ptr, image, fmask, addr_vec;
+
+	/* Ignore src0, because KHR_blend_func_extended disallows multiple render
+	 * targets.
+	 */
+
+	/* Load the image descriptor. */
+	STATIC_ASSERT(SI_PS_IMAGE_COLORBUF0 % 2 == 0);
+	ptr = LLVMGetParam(ctx->main_fn, ctx->param_rw_buffers);
+	ptr = LLVMBuildPointerCast(ctx->ac.builder, ptr,
+				   ac_array_in_const32_addr_space(ctx->v8i32), "");
+	image = ac_build_load_to_sgpr(&ctx->ac, ptr,
+			LLVMConstInt(ctx->i32, SI_PS_IMAGE_COLORBUF0 / 2, 0));
+
+	LLVMValueRef addr[4];
+	unsigned chan = 0;
+
+	addr[chan++] = si_unpack_param(ctx, SI_PARAM_POS_FIXED_PT, 0, 16);
+
+	if (!ctx->shader->key.mono.u.ps.fbfetch_is_1D)
+		addr[chan++] = si_unpack_param(ctx, SI_PARAM_POS_FIXED_PT, 16, 16);
+
+	/* Get the current render target layer index. */
+	if (ctx->shader->key.mono.u.ps.fbfetch_layered)
+		addr[chan++] = si_unpack_param(ctx, SI_PARAM_ANCILLARY, 16, 11);
+
+	if (ctx->shader->key.mono.u.ps.fbfetch_msaa)
+		addr[chan++] = si_get_sample_id(ctx);
+
+	while (chan < 4)
+		addr[chan++] = LLVMGetUndef(ctx->i32);
+
+	if (ctx->shader->key.mono.u.ps.fbfetch_msaa) {
+		fmask = ac_build_load_to_sgpr(&ctx->ac, ptr,
+			LLVMConstInt(ctx->i32, SI_PS_IMAGE_COLORBUF0_FMASK / 2, 0));
+
+		ac_apply_fmask_to_sample(&ctx->ac, fmask, addr, false);
+	}
+
+	addr_vec = ac_build_gather_values(&ctx->ac, addr, ARRAY_SIZE(addr));
+
+	args.opcode = ac_image_load;
+	args.resource = image;
+	args.addr = addr_vec;
+	args.dmask = 0xf;
+	args.da = ctx->shader->key.mono.u.ps.fbfetch_layered;
+
+	emit_data->output[emit_data->chan] =
+		ac_build_image_opcode(&ctx->ac, &args);
+}
+
 static const struct lp_build_tgsi_action tex_action = {
 	.fetch_args = tex_fetch_args,
 	.emit = build_tex_intrinsic,
@@ -1974,6 +1962,8 @@ void si_shader_context_init_mem(struct si_shader_context *ctx)
 	bld_base->op_actions[TGSI_OPCODE_TG4] = tex_action;
 	bld_base->op_actions[TGSI_OPCODE_LODQ] = tex_action;
 	bld_base->op_actions[TGSI_OPCODE_TXQS].emit = si_llvm_emit_txqs;
+
+	bld_base->op_actions[TGSI_OPCODE_FBFETCH].emit = si_llvm_emit_fbfetch;
 
 	bld_base->op_actions[TGSI_OPCODE_LOAD].fetch_args = load_fetch_args;
 	bld_base->op_actions[TGSI_OPCODE_LOAD].emit = load_emit;

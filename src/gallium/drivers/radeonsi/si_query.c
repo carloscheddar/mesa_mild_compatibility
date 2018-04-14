@@ -1,6 +1,8 @@
 /*
  * Copyright 2010 Jerome Glisse <glisse@freedesktop.org>
  * Copyright 2014 Marek Olšák <marek.olsak@amd.com>
+ * Copyright 2018 Advanced Micro Devices, Inc.
+ * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,18 +24,17 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "radeonsi/si_pipe.h"
-#include "r600_query.h"
-#include "r600_cs.h"
+#include "si_pipe.h"
+#include "si_query.h"
 #include "util/u_memory.h"
 #include "util/u_upload_mgr.h"
 #include "util/os_time.h"
 #include "tgsi/tgsi_text.h"
 #include "amd/common/sid.h"
 
-#define R600_MAX_STREAMS 4
+#define SI_MAX_STREAMS 4
 
-struct r600_hw_query_params {
+struct si_hw_query_params {
 	unsigned start_offset;
 	unsigned end_offset;
 	unsigned fence_offset;
@@ -42,8 +43,8 @@ struct r600_hw_query_params {
 };
 
 /* Queries without buffer handling or suspend/resume. */
-struct r600_query_sw {
-	struct r600_query b;
+struct si_query_sw {
+	struct si_query b;
 
 	uint64_t begin_result;
 	uint64_t end_result;
@@ -55,10 +56,10 @@ struct r600_query_sw {
 	struct pipe_fence_handle *fence;
 };
 
-static void r600_query_sw_destroy(struct si_screen *sscreen,
-				  struct r600_query *rquery)
+static void si_query_sw_destroy(struct si_screen *sscreen,
+				struct si_query *rquery)
 {
-	struct r600_query_sw *query = (struct r600_query_sw *)rquery;
+	struct si_query_sw *query = (struct si_query_sw *)rquery;
 
 	sscreen->b.fence_reference(&sscreen->b, &query->fence, NULL);
 	FREE(query);
@@ -67,408 +68,408 @@ static void r600_query_sw_destroy(struct si_screen *sscreen,
 static enum radeon_value_id winsys_id_from_type(unsigned type)
 {
 	switch (type) {
-	case R600_QUERY_REQUESTED_VRAM: return RADEON_REQUESTED_VRAM_MEMORY;
-	case R600_QUERY_REQUESTED_GTT: return RADEON_REQUESTED_GTT_MEMORY;
-	case R600_QUERY_MAPPED_VRAM: return RADEON_MAPPED_VRAM;
-	case R600_QUERY_MAPPED_GTT: return RADEON_MAPPED_GTT;
-	case R600_QUERY_BUFFER_WAIT_TIME: return RADEON_BUFFER_WAIT_TIME_NS;
-	case R600_QUERY_NUM_MAPPED_BUFFERS: return RADEON_NUM_MAPPED_BUFFERS;
-	case R600_QUERY_NUM_GFX_IBS: return RADEON_NUM_GFX_IBS;
-	case R600_QUERY_NUM_SDMA_IBS: return RADEON_NUM_SDMA_IBS;
-	case R600_QUERY_GFX_BO_LIST_SIZE: return RADEON_GFX_BO_LIST_COUNTER;
-	case R600_QUERY_GFX_IB_SIZE: return RADEON_GFX_IB_SIZE_COUNTER;
-	case R600_QUERY_NUM_BYTES_MOVED: return RADEON_NUM_BYTES_MOVED;
-	case R600_QUERY_NUM_EVICTIONS: return RADEON_NUM_EVICTIONS;
-	case R600_QUERY_NUM_VRAM_CPU_PAGE_FAULTS: return RADEON_NUM_VRAM_CPU_PAGE_FAULTS;
-	case R600_QUERY_VRAM_USAGE: return RADEON_VRAM_USAGE;
-	case R600_QUERY_VRAM_VIS_USAGE: return RADEON_VRAM_VIS_USAGE;
-	case R600_QUERY_GTT_USAGE: return RADEON_GTT_USAGE;
-	case R600_QUERY_GPU_TEMPERATURE: return RADEON_GPU_TEMPERATURE;
-	case R600_QUERY_CURRENT_GPU_SCLK: return RADEON_CURRENT_SCLK;
-	case R600_QUERY_CURRENT_GPU_MCLK: return RADEON_CURRENT_MCLK;
-	case R600_QUERY_CS_THREAD_BUSY: return RADEON_CS_THREAD_TIME;
+	case SI_QUERY_REQUESTED_VRAM: return RADEON_REQUESTED_VRAM_MEMORY;
+	case SI_QUERY_REQUESTED_GTT: return RADEON_REQUESTED_GTT_MEMORY;
+	case SI_QUERY_MAPPED_VRAM: return RADEON_MAPPED_VRAM;
+	case SI_QUERY_MAPPED_GTT: return RADEON_MAPPED_GTT;
+	case SI_QUERY_BUFFER_WAIT_TIME: return RADEON_BUFFER_WAIT_TIME_NS;
+	case SI_QUERY_NUM_MAPPED_BUFFERS: return RADEON_NUM_MAPPED_BUFFERS;
+	case SI_QUERY_NUM_GFX_IBS: return RADEON_NUM_GFX_IBS;
+	case SI_QUERY_NUM_SDMA_IBS: return RADEON_NUM_SDMA_IBS;
+	case SI_QUERY_GFX_BO_LIST_SIZE: return RADEON_GFX_BO_LIST_COUNTER;
+	case SI_QUERY_GFX_IB_SIZE: return RADEON_GFX_IB_SIZE_COUNTER;
+	case SI_QUERY_NUM_BYTES_MOVED: return RADEON_NUM_BYTES_MOVED;
+	case SI_QUERY_NUM_EVICTIONS: return RADEON_NUM_EVICTIONS;
+	case SI_QUERY_NUM_VRAM_CPU_PAGE_FAULTS: return RADEON_NUM_VRAM_CPU_PAGE_FAULTS;
+	case SI_QUERY_VRAM_USAGE: return RADEON_VRAM_USAGE;
+	case SI_QUERY_VRAM_VIS_USAGE: return RADEON_VRAM_VIS_USAGE;
+	case SI_QUERY_GTT_USAGE: return RADEON_GTT_USAGE;
+	case SI_QUERY_GPU_TEMPERATURE: return RADEON_GPU_TEMPERATURE;
+	case SI_QUERY_CURRENT_GPU_SCLK: return RADEON_CURRENT_SCLK;
+	case SI_QUERY_CURRENT_GPU_MCLK: return RADEON_CURRENT_MCLK;
+	case SI_QUERY_CS_THREAD_BUSY: return RADEON_CS_THREAD_TIME;
 	default: unreachable("query type does not correspond to winsys id");
 	}
 }
 
-static bool r600_query_sw_begin(struct r600_common_context *rctx,
-				struct r600_query *rquery)
+static bool si_query_sw_begin(struct si_context *sctx,
+			      struct si_query *rquery)
 {
-	struct r600_query_sw *query = (struct r600_query_sw *)rquery;
+	struct si_query_sw *query = (struct si_query_sw *)rquery;
 	enum radeon_value_id ws_id;
 
 	switch(query->b.type) {
 	case PIPE_QUERY_TIMESTAMP_DISJOINT:
 	case PIPE_QUERY_GPU_FINISHED:
 		break;
-	case R600_QUERY_DRAW_CALLS:
-		query->begin_result = rctx->num_draw_calls;
+	case SI_QUERY_DRAW_CALLS:
+		query->begin_result = sctx->num_draw_calls;
 		break;
-	case R600_QUERY_DECOMPRESS_CALLS:
-		query->begin_result = rctx->num_decompress_calls;
+	case SI_QUERY_DECOMPRESS_CALLS:
+		query->begin_result = sctx->num_decompress_calls;
 		break;
-	case R600_QUERY_MRT_DRAW_CALLS:
-		query->begin_result = rctx->num_mrt_draw_calls;
+	case SI_QUERY_MRT_DRAW_CALLS:
+		query->begin_result = sctx->num_mrt_draw_calls;
 		break;
-	case R600_QUERY_PRIM_RESTART_CALLS:
-		query->begin_result = rctx->num_prim_restart_calls;
+	case SI_QUERY_PRIM_RESTART_CALLS:
+		query->begin_result = sctx->num_prim_restart_calls;
 		break;
-	case R600_QUERY_SPILL_DRAW_CALLS:
-		query->begin_result = rctx->num_spill_draw_calls;
+	case SI_QUERY_SPILL_DRAW_CALLS:
+		query->begin_result = sctx->num_spill_draw_calls;
 		break;
-	case R600_QUERY_COMPUTE_CALLS:
-		query->begin_result = rctx->num_compute_calls;
+	case SI_QUERY_COMPUTE_CALLS:
+		query->begin_result = sctx->num_compute_calls;
 		break;
-	case R600_QUERY_SPILL_COMPUTE_CALLS:
-		query->begin_result = rctx->num_spill_compute_calls;
+	case SI_QUERY_SPILL_COMPUTE_CALLS:
+		query->begin_result = sctx->num_spill_compute_calls;
 		break;
-	case R600_QUERY_DMA_CALLS:
-		query->begin_result = rctx->num_dma_calls;
+	case SI_QUERY_DMA_CALLS:
+		query->begin_result = sctx->num_dma_calls;
 		break;
-	case R600_QUERY_CP_DMA_CALLS:
-		query->begin_result = rctx->num_cp_dma_calls;
+	case SI_QUERY_CP_DMA_CALLS:
+		query->begin_result = sctx->num_cp_dma_calls;
 		break;
-	case R600_QUERY_NUM_VS_FLUSHES:
-		query->begin_result = rctx->num_vs_flushes;
+	case SI_QUERY_NUM_VS_FLUSHES:
+		query->begin_result = sctx->num_vs_flushes;
 		break;
-	case R600_QUERY_NUM_PS_FLUSHES:
-		query->begin_result = rctx->num_ps_flushes;
+	case SI_QUERY_NUM_PS_FLUSHES:
+		query->begin_result = sctx->num_ps_flushes;
 		break;
-	case R600_QUERY_NUM_CS_FLUSHES:
-		query->begin_result = rctx->num_cs_flushes;
+	case SI_QUERY_NUM_CS_FLUSHES:
+		query->begin_result = sctx->num_cs_flushes;
 		break;
-	case R600_QUERY_NUM_CB_CACHE_FLUSHES:
-		query->begin_result = rctx->num_cb_cache_flushes;
+	case SI_QUERY_NUM_CB_CACHE_FLUSHES:
+		query->begin_result = sctx->num_cb_cache_flushes;
 		break;
-	case R600_QUERY_NUM_DB_CACHE_FLUSHES:
-		query->begin_result = rctx->num_db_cache_flushes;
+	case SI_QUERY_NUM_DB_CACHE_FLUSHES:
+		query->begin_result = sctx->num_db_cache_flushes;
 		break;
-	case R600_QUERY_NUM_L2_INVALIDATES:
-		query->begin_result = rctx->num_L2_invalidates;
+	case SI_QUERY_NUM_L2_INVALIDATES:
+		query->begin_result = sctx->num_L2_invalidates;
 		break;
-	case R600_QUERY_NUM_L2_WRITEBACKS:
-		query->begin_result = rctx->num_L2_writebacks;
+	case SI_QUERY_NUM_L2_WRITEBACKS:
+		query->begin_result = sctx->num_L2_writebacks;
 		break;
-	case R600_QUERY_NUM_RESIDENT_HANDLES:
-		query->begin_result = rctx->num_resident_handles;
+	case SI_QUERY_NUM_RESIDENT_HANDLES:
+		query->begin_result = sctx->num_resident_handles;
 		break;
-	case R600_QUERY_TC_OFFLOADED_SLOTS:
-		query->begin_result = rctx->tc ? rctx->tc->num_offloaded_slots : 0;
+	case SI_QUERY_TC_OFFLOADED_SLOTS:
+		query->begin_result = sctx->tc ? sctx->tc->num_offloaded_slots : 0;
 		break;
-	case R600_QUERY_TC_DIRECT_SLOTS:
-		query->begin_result = rctx->tc ? rctx->tc->num_direct_slots : 0;
+	case SI_QUERY_TC_DIRECT_SLOTS:
+		query->begin_result = sctx->tc ? sctx->tc->num_direct_slots : 0;
 		break;
-	case R600_QUERY_TC_NUM_SYNCS:
-		query->begin_result = rctx->tc ? rctx->tc->num_syncs : 0;
+	case SI_QUERY_TC_NUM_SYNCS:
+		query->begin_result = sctx->tc ? sctx->tc->num_syncs : 0;
 		break;
-	case R600_QUERY_REQUESTED_VRAM:
-	case R600_QUERY_REQUESTED_GTT:
-	case R600_QUERY_MAPPED_VRAM:
-	case R600_QUERY_MAPPED_GTT:
-	case R600_QUERY_VRAM_USAGE:
-	case R600_QUERY_VRAM_VIS_USAGE:
-	case R600_QUERY_GTT_USAGE:
-	case R600_QUERY_GPU_TEMPERATURE:
-	case R600_QUERY_CURRENT_GPU_SCLK:
-	case R600_QUERY_CURRENT_GPU_MCLK:
-	case R600_QUERY_BACK_BUFFER_PS_DRAW_RATIO:
-	case R600_QUERY_NUM_MAPPED_BUFFERS:
+	case SI_QUERY_REQUESTED_VRAM:
+	case SI_QUERY_REQUESTED_GTT:
+	case SI_QUERY_MAPPED_VRAM:
+	case SI_QUERY_MAPPED_GTT:
+	case SI_QUERY_VRAM_USAGE:
+	case SI_QUERY_VRAM_VIS_USAGE:
+	case SI_QUERY_GTT_USAGE:
+	case SI_QUERY_GPU_TEMPERATURE:
+	case SI_QUERY_CURRENT_GPU_SCLK:
+	case SI_QUERY_CURRENT_GPU_MCLK:
+	case SI_QUERY_BACK_BUFFER_PS_DRAW_RATIO:
+	case SI_QUERY_NUM_MAPPED_BUFFERS:
 		query->begin_result = 0;
 		break;
-	case R600_QUERY_BUFFER_WAIT_TIME:
-	case R600_QUERY_GFX_IB_SIZE:
-	case R600_QUERY_NUM_GFX_IBS:
-	case R600_QUERY_NUM_SDMA_IBS:
-	case R600_QUERY_NUM_BYTES_MOVED:
-	case R600_QUERY_NUM_EVICTIONS:
-	case R600_QUERY_NUM_VRAM_CPU_PAGE_FAULTS: {
+	case SI_QUERY_BUFFER_WAIT_TIME:
+	case SI_QUERY_GFX_IB_SIZE:
+	case SI_QUERY_NUM_GFX_IBS:
+	case SI_QUERY_NUM_SDMA_IBS:
+	case SI_QUERY_NUM_BYTES_MOVED:
+	case SI_QUERY_NUM_EVICTIONS:
+	case SI_QUERY_NUM_VRAM_CPU_PAGE_FAULTS: {
 		enum radeon_value_id ws_id = winsys_id_from_type(query->b.type);
-		query->begin_result = rctx->ws->query_value(rctx->ws, ws_id);
+		query->begin_result = sctx->ws->query_value(sctx->ws, ws_id);
 		break;
 	}
-	case R600_QUERY_GFX_BO_LIST_SIZE:
+	case SI_QUERY_GFX_BO_LIST_SIZE:
 		ws_id = winsys_id_from_type(query->b.type);
-		query->begin_result = rctx->ws->query_value(rctx->ws, ws_id);
-		query->begin_time = rctx->ws->query_value(rctx->ws,
+		query->begin_result = sctx->ws->query_value(sctx->ws, ws_id);
+		query->begin_time = sctx->ws->query_value(sctx->ws,
 							  RADEON_NUM_GFX_IBS);
 		break;
-	case R600_QUERY_CS_THREAD_BUSY:
+	case SI_QUERY_CS_THREAD_BUSY:
 		ws_id = winsys_id_from_type(query->b.type);
-		query->begin_result = rctx->ws->query_value(rctx->ws, ws_id);
+		query->begin_result = sctx->ws->query_value(sctx->ws, ws_id);
 		query->begin_time = os_time_get_nano();
 		break;
-	case R600_QUERY_GALLIUM_THREAD_BUSY:
+	case SI_QUERY_GALLIUM_THREAD_BUSY:
 		query->begin_result =
-			rctx->tc ? util_queue_get_thread_time_nano(&rctx->tc->queue, 0) : 0;
+			sctx->tc ? util_queue_get_thread_time_nano(&sctx->tc->queue, 0) : 0;
 		query->begin_time = os_time_get_nano();
 		break;
-	case R600_QUERY_GPU_LOAD:
-	case R600_QUERY_GPU_SHADERS_BUSY:
-	case R600_QUERY_GPU_TA_BUSY:
-	case R600_QUERY_GPU_GDS_BUSY:
-	case R600_QUERY_GPU_VGT_BUSY:
-	case R600_QUERY_GPU_IA_BUSY:
-	case R600_QUERY_GPU_SX_BUSY:
-	case R600_QUERY_GPU_WD_BUSY:
-	case R600_QUERY_GPU_BCI_BUSY:
-	case R600_QUERY_GPU_SC_BUSY:
-	case R600_QUERY_GPU_PA_BUSY:
-	case R600_QUERY_GPU_DB_BUSY:
-	case R600_QUERY_GPU_CP_BUSY:
-	case R600_QUERY_GPU_CB_BUSY:
-	case R600_QUERY_GPU_SDMA_BUSY:
-	case R600_QUERY_GPU_PFP_BUSY:
-	case R600_QUERY_GPU_MEQ_BUSY:
-	case R600_QUERY_GPU_ME_BUSY:
-	case R600_QUERY_GPU_SURF_SYNC_BUSY:
-	case R600_QUERY_GPU_CP_DMA_BUSY:
-	case R600_QUERY_GPU_SCRATCH_RAM_BUSY:
-		query->begin_result = si_begin_counter(rctx->screen,
+	case SI_QUERY_GPU_LOAD:
+	case SI_QUERY_GPU_SHADERS_BUSY:
+	case SI_QUERY_GPU_TA_BUSY:
+	case SI_QUERY_GPU_GDS_BUSY:
+	case SI_QUERY_GPU_VGT_BUSY:
+	case SI_QUERY_GPU_IA_BUSY:
+	case SI_QUERY_GPU_SX_BUSY:
+	case SI_QUERY_GPU_WD_BUSY:
+	case SI_QUERY_GPU_BCI_BUSY:
+	case SI_QUERY_GPU_SC_BUSY:
+	case SI_QUERY_GPU_PA_BUSY:
+	case SI_QUERY_GPU_DB_BUSY:
+	case SI_QUERY_GPU_CP_BUSY:
+	case SI_QUERY_GPU_CB_BUSY:
+	case SI_QUERY_GPU_SDMA_BUSY:
+	case SI_QUERY_GPU_PFP_BUSY:
+	case SI_QUERY_GPU_MEQ_BUSY:
+	case SI_QUERY_GPU_ME_BUSY:
+	case SI_QUERY_GPU_SURF_SYNC_BUSY:
+	case SI_QUERY_GPU_CP_DMA_BUSY:
+	case SI_QUERY_GPU_SCRATCH_RAM_BUSY:
+		query->begin_result = si_begin_counter(sctx->screen,
 							 query->b.type);
 		break;
-	case R600_QUERY_NUM_COMPILATIONS:
-		query->begin_result = p_atomic_read(&rctx->screen->num_compilations);
+	case SI_QUERY_NUM_COMPILATIONS:
+		query->begin_result = p_atomic_read(&sctx->screen->num_compilations);
 		break;
-	case R600_QUERY_NUM_SHADERS_CREATED:
-		query->begin_result = p_atomic_read(&rctx->screen->num_shaders_created);
+	case SI_QUERY_NUM_SHADERS_CREATED:
+		query->begin_result = p_atomic_read(&sctx->screen->num_shaders_created);
 		break;
-	case R600_QUERY_NUM_SHADER_CACHE_HITS:
+	case SI_QUERY_NUM_SHADER_CACHE_HITS:
 		query->begin_result =
-			p_atomic_read(&rctx->screen->num_shader_cache_hits);
+			p_atomic_read(&sctx->screen->num_shader_cache_hits);
 		break;
-	case R600_QUERY_GPIN_ASIC_ID:
-	case R600_QUERY_GPIN_NUM_SIMD:
-	case R600_QUERY_GPIN_NUM_RB:
-	case R600_QUERY_GPIN_NUM_SPI:
-	case R600_QUERY_GPIN_NUM_SE:
+	case SI_QUERY_GPIN_ASIC_ID:
+	case SI_QUERY_GPIN_NUM_SIMD:
+	case SI_QUERY_GPIN_NUM_RB:
+	case SI_QUERY_GPIN_NUM_SPI:
+	case SI_QUERY_GPIN_NUM_SE:
 		break;
 	default:
-		unreachable("r600_query_sw_begin: bad query type");
+		unreachable("si_query_sw_begin: bad query type");
 	}
 
 	return true;
 }
 
-static bool r600_query_sw_end(struct r600_common_context *rctx,
-			      struct r600_query *rquery)
+static bool si_query_sw_end(struct si_context *sctx,
+			    struct si_query *rquery)
 {
-	struct r600_query_sw *query = (struct r600_query_sw *)rquery;
+	struct si_query_sw *query = (struct si_query_sw *)rquery;
 	enum radeon_value_id ws_id;
 
 	switch(query->b.type) {
 	case PIPE_QUERY_TIMESTAMP_DISJOINT:
 		break;
 	case PIPE_QUERY_GPU_FINISHED:
-		rctx->b.flush(&rctx->b, &query->fence, PIPE_FLUSH_DEFERRED);
+		sctx->b.flush(&sctx->b, &query->fence, PIPE_FLUSH_DEFERRED);
 		break;
-	case R600_QUERY_DRAW_CALLS:
-		query->end_result = rctx->num_draw_calls;
+	case SI_QUERY_DRAW_CALLS:
+		query->end_result = sctx->num_draw_calls;
 		break;
-	case R600_QUERY_DECOMPRESS_CALLS:
-		query->end_result = rctx->num_decompress_calls;
+	case SI_QUERY_DECOMPRESS_CALLS:
+		query->end_result = sctx->num_decompress_calls;
 		break;
-	case R600_QUERY_MRT_DRAW_CALLS:
-		query->end_result = rctx->num_mrt_draw_calls;
+	case SI_QUERY_MRT_DRAW_CALLS:
+		query->end_result = sctx->num_mrt_draw_calls;
 		break;
-	case R600_QUERY_PRIM_RESTART_CALLS:
-		query->end_result = rctx->num_prim_restart_calls;
+	case SI_QUERY_PRIM_RESTART_CALLS:
+		query->end_result = sctx->num_prim_restart_calls;
 		break;
-	case R600_QUERY_SPILL_DRAW_CALLS:
-		query->end_result = rctx->num_spill_draw_calls;
+	case SI_QUERY_SPILL_DRAW_CALLS:
+		query->end_result = sctx->num_spill_draw_calls;
 		break;
-	case R600_QUERY_COMPUTE_CALLS:
-		query->end_result = rctx->num_compute_calls;
+	case SI_QUERY_COMPUTE_CALLS:
+		query->end_result = sctx->num_compute_calls;
 		break;
-	case R600_QUERY_SPILL_COMPUTE_CALLS:
-		query->end_result = rctx->num_spill_compute_calls;
+	case SI_QUERY_SPILL_COMPUTE_CALLS:
+		query->end_result = sctx->num_spill_compute_calls;
 		break;
-	case R600_QUERY_DMA_CALLS:
-		query->end_result = rctx->num_dma_calls;
+	case SI_QUERY_DMA_CALLS:
+		query->end_result = sctx->num_dma_calls;
 		break;
-	case R600_QUERY_CP_DMA_CALLS:
-		query->end_result = rctx->num_cp_dma_calls;
+	case SI_QUERY_CP_DMA_CALLS:
+		query->end_result = sctx->num_cp_dma_calls;
 		break;
-	case R600_QUERY_NUM_VS_FLUSHES:
-		query->end_result = rctx->num_vs_flushes;
+	case SI_QUERY_NUM_VS_FLUSHES:
+		query->end_result = sctx->num_vs_flushes;
 		break;
-	case R600_QUERY_NUM_PS_FLUSHES:
-		query->end_result = rctx->num_ps_flushes;
+	case SI_QUERY_NUM_PS_FLUSHES:
+		query->end_result = sctx->num_ps_flushes;
 		break;
-	case R600_QUERY_NUM_CS_FLUSHES:
-		query->end_result = rctx->num_cs_flushes;
+	case SI_QUERY_NUM_CS_FLUSHES:
+		query->end_result = sctx->num_cs_flushes;
 		break;
-	case R600_QUERY_NUM_CB_CACHE_FLUSHES:
-		query->end_result = rctx->num_cb_cache_flushes;
+	case SI_QUERY_NUM_CB_CACHE_FLUSHES:
+		query->end_result = sctx->num_cb_cache_flushes;
 		break;
-	case R600_QUERY_NUM_DB_CACHE_FLUSHES:
-		query->end_result = rctx->num_db_cache_flushes;
+	case SI_QUERY_NUM_DB_CACHE_FLUSHES:
+		query->end_result = sctx->num_db_cache_flushes;
 		break;
-	case R600_QUERY_NUM_L2_INVALIDATES:
-		query->end_result = rctx->num_L2_invalidates;
+	case SI_QUERY_NUM_L2_INVALIDATES:
+		query->end_result = sctx->num_L2_invalidates;
 		break;
-	case R600_QUERY_NUM_L2_WRITEBACKS:
-		query->end_result = rctx->num_L2_writebacks;
+	case SI_QUERY_NUM_L2_WRITEBACKS:
+		query->end_result = sctx->num_L2_writebacks;
 		break;
-	case R600_QUERY_NUM_RESIDENT_HANDLES:
-		query->end_result = rctx->num_resident_handles;
+	case SI_QUERY_NUM_RESIDENT_HANDLES:
+		query->end_result = sctx->num_resident_handles;
 		break;
-	case R600_QUERY_TC_OFFLOADED_SLOTS:
-		query->end_result = rctx->tc ? rctx->tc->num_offloaded_slots : 0;
+	case SI_QUERY_TC_OFFLOADED_SLOTS:
+		query->end_result = sctx->tc ? sctx->tc->num_offloaded_slots : 0;
 		break;
-	case R600_QUERY_TC_DIRECT_SLOTS:
-		query->end_result = rctx->tc ? rctx->tc->num_direct_slots : 0;
+	case SI_QUERY_TC_DIRECT_SLOTS:
+		query->end_result = sctx->tc ? sctx->tc->num_direct_slots : 0;
 		break;
-	case R600_QUERY_TC_NUM_SYNCS:
-		query->end_result = rctx->tc ? rctx->tc->num_syncs : 0;
+	case SI_QUERY_TC_NUM_SYNCS:
+		query->end_result = sctx->tc ? sctx->tc->num_syncs : 0;
 		break;
-	case R600_QUERY_REQUESTED_VRAM:
-	case R600_QUERY_REQUESTED_GTT:
-	case R600_QUERY_MAPPED_VRAM:
-	case R600_QUERY_MAPPED_GTT:
-	case R600_QUERY_VRAM_USAGE:
-	case R600_QUERY_VRAM_VIS_USAGE:
-	case R600_QUERY_GTT_USAGE:
-	case R600_QUERY_GPU_TEMPERATURE:
-	case R600_QUERY_CURRENT_GPU_SCLK:
-	case R600_QUERY_CURRENT_GPU_MCLK:
-	case R600_QUERY_BUFFER_WAIT_TIME:
-	case R600_QUERY_GFX_IB_SIZE:
-	case R600_QUERY_NUM_MAPPED_BUFFERS:
-	case R600_QUERY_NUM_GFX_IBS:
-	case R600_QUERY_NUM_SDMA_IBS:
-	case R600_QUERY_NUM_BYTES_MOVED:
-	case R600_QUERY_NUM_EVICTIONS:
-	case R600_QUERY_NUM_VRAM_CPU_PAGE_FAULTS: {
+	case SI_QUERY_REQUESTED_VRAM:
+	case SI_QUERY_REQUESTED_GTT:
+	case SI_QUERY_MAPPED_VRAM:
+	case SI_QUERY_MAPPED_GTT:
+	case SI_QUERY_VRAM_USAGE:
+	case SI_QUERY_VRAM_VIS_USAGE:
+	case SI_QUERY_GTT_USAGE:
+	case SI_QUERY_GPU_TEMPERATURE:
+	case SI_QUERY_CURRENT_GPU_SCLK:
+	case SI_QUERY_CURRENT_GPU_MCLK:
+	case SI_QUERY_BUFFER_WAIT_TIME:
+	case SI_QUERY_GFX_IB_SIZE:
+	case SI_QUERY_NUM_MAPPED_BUFFERS:
+	case SI_QUERY_NUM_GFX_IBS:
+	case SI_QUERY_NUM_SDMA_IBS:
+	case SI_QUERY_NUM_BYTES_MOVED:
+	case SI_QUERY_NUM_EVICTIONS:
+	case SI_QUERY_NUM_VRAM_CPU_PAGE_FAULTS: {
 		enum radeon_value_id ws_id = winsys_id_from_type(query->b.type);
-		query->end_result = rctx->ws->query_value(rctx->ws, ws_id);
+		query->end_result = sctx->ws->query_value(sctx->ws, ws_id);
 		break;
 	}
-	case R600_QUERY_GFX_BO_LIST_SIZE:
+	case SI_QUERY_GFX_BO_LIST_SIZE:
 		ws_id = winsys_id_from_type(query->b.type);
-		query->end_result = rctx->ws->query_value(rctx->ws, ws_id);
-		query->end_time = rctx->ws->query_value(rctx->ws,
+		query->end_result = sctx->ws->query_value(sctx->ws, ws_id);
+		query->end_time = sctx->ws->query_value(sctx->ws,
 							RADEON_NUM_GFX_IBS);
 		break;
-	case R600_QUERY_CS_THREAD_BUSY:
+	case SI_QUERY_CS_THREAD_BUSY:
 		ws_id = winsys_id_from_type(query->b.type);
-		query->end_result = rctx->ws->query_value(rctx->ws, ws_id);
+		query->end_result = sctx->ws->query_value(sctx->ws, ws_id);
 		query->end_time = os_time_get_nano();
 		break;
-	case R600_QUERY_GALLIUM_THREAD_BUSY:
+	case SI_QUERY_GALLIUM_THREAD_BUSY:
 		query->end_result =
-			rctx->tc ? util_queue_get_thread_time_nano(&rctx->tc->queue, 0) : 0;
+			sctx->tc ? util_queue_get_thread_time_nano(&sctx->tc->queue, 0) : 0;
 		query->end_time = os_time_get_nano();
 		break;
-	case R600_QUERY_GPU_LOAD:
-	case R600_QUERY_GPU_SHADERS_BUSY:
-	case R600_QUERY_GPU_TA_BUSY:
-	case R600_QUERY_GPU_GDS_BUSY:
-	case R600_QUERY_GPU_VGT_BUSY:
-	case R600_QUERY_GPU_IA_BUSY:
-	case R600_QUERY_GPU_SX_BUSY:
-	case R600_QUERY_GPU_WD_BUSY:
-	case R600_QUERY_GPU_BCI_BUSY:
-	case R600_QUERY_GPU_SC_BUSY:
-	case R600_QUERY_GPU_PA_BUSY:
-	case R600_QUERY_GPU_DB_BUSY:
-	case R600_QUERY_GPU_CP_BUSY:
-	case R600_QUERY_GPU_CB_BUSY:
-	case R600_QUERY_GPU_SDMA_BUSY:
-	case R600_QUERY_GPU_PFP_BUSY:
-	case R600_QUERY_GPU_MEQ_BUSY:
-	case R600_QUERY_GPU_ME_BUSY:
-	case R600_QUERY_GPU_SURF_SYNC_BUSY:
-	case R600_QUERY_GPU_CP_DMA_BUSY:
-	case R600_QUERY_GPU_SCRATCH_RAM_BUSY:
-		query->end_result = si_end_counter(rctx->screen,
+	case SI_QUERY_GPU_LOAD:
+	case SI_QUERY_GPU_SHADERS_BUSY:
+	case SI_QUERY_GPU_TA_BUSY:
+	case SI_QUERY_GPU_GDS_BUSY:
+	case SI_QUERY_GPU_VGT_BUSY:
+	case SI_QUERY_GPU_IA_BUSY:
+	case SI_QUERY_GPU_SX_BUSY:
+	case SI_QUERY_GPU_WD_BUSY:
+	case SI_QUERY_GPU_BCI_BUSY:
+	case SI_QUERY_GPU_SC_BUSY:
+	case SI_QUERY_GPU_PA_BUSY:
+	case SI_QUERY_GPU_DB_BUSY:
+	case SI_QUERY_GPU_CP_BUSY:
+	case SI_QUERY_GPU_CB_BUSY:
+	case SI_QUERY_GPU_SDMA_BUSY:
+	case SI_QUERY_GPU_PFP_BUSY:
+	case SI_QUERY_GPU_MEQ_BUSY:
+	case SI_QUERY_GPU_ME_BUSY:
+	case SI_QUERY_GPU_SURF_SYNC_BUSY:
+	case SI_QUERY_GPU_CP_DMA_BUSY:
+	case SI_QUERY_GPU_SCRATCH_RAM_BUSY:
+		query->end_result = si_end_counter(sctx->screen,
 						     query->b.type,
 						     query->begin_result);
 		query->begin_result = 0;
 		break;
-	case R600_QUERY_NUM_COMPILATIONS:
-		query->end_result = p_atomic_read(&rctx->screen->num_compilations);
+	case SI_QUERY_NUM_COMPILATIONS:
+		query->end_result = p_atomic_read(&sctx->screen->num_compilations);
 		break;
-	case R600_QUERY_NUM_SHADERS_CREATED:
-		query->end_result = p_atomic_read(&rctx->screen->num_shaders_created);
+	case SI_QUERY_NUM_SHADERS_CREATED:
+		query->end_result = p_atomic_read(&sctx->screen->num_shaders_created);
 		break;
-	case R600_QUERY_BACK_BUFFER_PS_DRAW_RATIO:
-		query->end_result = rctx->last_tex_ps_draw_ratio;
+	case SI_QUERY_BACK_BUFFER_PS_DRAW_RATIO:
+		query->end_result = sctx->last_tex_ps_draw_ratio;
 		break;
-	case R600_QUERY_NUM_SHADER_CACHE_HITS:
+	case SI_QUERY_NUM_SHADER_CACHE_HITS:
 		query->end_result =
-			p_atomic_read(&rctx->screen->num_shader_cache_hits);
+			p_atomic_read(&sctx->screen->num_shader_cache_hits);
 		break;
-	case R600_QUERY_GPIN_ASIC_ID:
-	case R600_QUERY_GPIN_NUM_SIMD:
-	case R600_QUERY_GPIN_NUM_RB:
-	case R600_QUERY_GPIN_NUM_SPI:
-	case R600_QUERY_GPIN_NUM_SE:
+	case SI_QUERY_GPIN_ASIC_ID:
+	case SI_QUERY_GPIN_NUM_SIMD:
+	case SI_QUERY_GPIN_NUM_RB:
+	case SI_QUERY_GPIN_NUM_SPI:
+	case SI_QUERY_GPIN_NUM_SE:
 		break;
 	default:
-		unreachable("r600_query_sw_end: bad query type");
+		unreachable("si_query_sw_end: bad query type");
 	}
 
 	return true;
 }
 
-static bool r600_query_sw_get_result(struct r600_common_context *rctx,
-				     struct r600_query *rquery,
-				     bool wait,
-				     union pipe_query_result *result)
+static bool si_query_sw_get_result(struct si_context *sctx,
+				   struct si_query *rquery,
+				   bool wait,
+				   union pipe_query_result *result)
 {
-	struct r600_query_sw *query = (struct r600_query_sw *)rquery;
+	struct si_query_sw *query = (struct si_query_sw *)rquery;
 
 	switch (query->b.type) {
 	case PIPE_QUERY_TIMESTAMP_DISJOINT:
 		/* Convert from cycles per millisecond to cycles per second (Hz). */
 		result->timestamp_disjoint.frequency =
-			(uint64_t)rctx->screen->info.clock_crystal_freq * 1000;
+			(uint64_t)sctx->screen->info.clock_crystal_freq * 1000;
 		result->timestamp_disjoint.disjoint = false;
 		return true;
 	case PIPE_QUERY_GPU_FINISHED: {
-		struct pipe_screen *screen = rctx->b.screen;
-		struct pipe_context *ctx = rquery->b.flushed ? NULL : &rctx->b;
+		struct pipe_screen *screen = sctx->b.screen;
+		struct pipe_context *ctx = rquery->b.flushed ? NULL : &sctx->b;
 
 		result->b = screen->fence_finish(screen, ctx, query->fence,
 						 wait ? PIPE_TIMEOUT_INFINITE : 0);
 		return result->b;
 	}
 
-	case R600_QUERY_GFX_BO_LIST_SIZE:
+	case SI_QUERY_GFX_BO_LIST_SIZE:
 		result->u64 = (query->end_result - query->begin_result) /
 			      (query->end_time - query->begin_time);
 		return true;
-	case R600_QUERY_CS_THREAD_BUSY:
-	case R600_QUERY_GALLIUM_THREAD_BUSY:
+	case SI_QUERY_CS_THREAD_BUSY:
+	case SI_QUERY_GALLIUM_THREAD_BUSY:
 		result->u64 = (query->end_result - query->begin_result) * 100 /
 			      (query->end_time - query->begin_time);
 		return true;
-	case R600_QUERY_GPIN_ASIC_ID:
+	case SI_QUERY_GPIN_ASIC_ID:
 		result->u32 = 0;
 		return true;
-	case R600_QUERY_GPIN_NUM_SIMD:
-		result->u32 = rctx->screen->info.num_good_compute_units;
+	case SI_QUERY_GPIN_NUM_SIMD:
+		result->u32 = sctx->screen->info.num_good_compute_units;
 		return true;
-	case R600_QUERY_GPIN_NUM_RB:
-		result->u32 = rctx->screen->info.num_render_backends;
+	case SI_QUERY_GPIN_NUM_RB:
+		result->u32 = sctx->screen->info.num_render_backends;
 		return true;
-	case R600_QUERY_GPIN_NUM_SPI:
+	case SI_QUERY_GPIN_NUM_SPI:
 		result->u32 = 1; /* all supported chips have one SPI per SE */
 		return true;
-	case R600_QUERY_GPIN_NUM_SE:
-		result->u32 = rctx->screen->info.max_se;
+	case SI_QUERY_GPIN_NUM_SE:
+		result->u32 = sctx->screen->info.max_se;
 		return true;
 	}
 
 	result->u64 = query->end_result - query->begin_result;
 
 	switch (query->b.type) {
-	case R600_QUERY_BUFFER_WAIT_TIME:
-	case R600_QUERY_GPU_TEMPERATURE:
+	case SI_QUERY_BUFFER_WAIT_TIME:
+	case SI_QUERY_GPU_TEMPERATURE:
 		result->u64 /= 1000;
 		break;
-	case R600_QUERY_CURRENT_GPU_SCLK:
-	case R600_QUERY_CURRENT_GPU_MCLK:
+	case SI_QUERY_CURRENT_GPU_SCLK:
+	case SI_QUERY_CURRENT_GPU_MCLK:
 		result->u64 *= 1000000;
 		break;
 	}
@@ -477,19 +478,19 @@ static bool r600_query_sw_get_result(struct r600_common_context *rctx,
 }
 
 
-static struct r600_query_ops sw_query_ops = {
-	.destroy = r600_query_sw_destroy,
-	.begin = r600_query_sw_begin,
-	.end = r600_query_sw_end,
-	.get_result = r600_query_sw_get_result,
+static struct si_query_ops sw_query_ops = {
+	.destroy = si_query_sw_destroy,
+	.begin = si_query_sw_begin,
+	.end = si_query_sw_end,
+	.get_result = si_query_sw_get_result,
 	.get_result_resource = NULL
 };
 
-static struct pipe_query *r600_query_sw_create(unsigned query_type)
+static struct pipe_query *si_query_sw_create(unsigned query_type)
 {
-	struct r600_query_sw *query;
+	struct si_query_sw *query;
 
-	query = CALLOC_STRUCT(r600_query_sw);
+	query = CALLOC_STRUCT(si_query_sw);
 	if (!query)
 		return NULL;
 
@@ -500,14 +501,14 @@ static struct pipe_query *r600_query_sw_create(unsigned query_type)
 }
 
 void si_query_hw_destroy(struct si_screen *sscreen,
-			 struct r600_query *rquery)
+			 struct si_query *rquery)
 {
-	struct r600_query_hw *query = (struct r600_query_hw *)rquery;
-	struct r600_query_buffer *prev = query->buffer.previous;
+	struct si_query_hw *query = (struct si_query_hw *)rquery;
+	struct si_query_buffer *prev = query->buffer.previous;
 
 	/* Release all query buffers. */
 	while (prev) {
-		struct r600_query_buffer *qbuf = prev;
+		struct si_query_buffer *qbuf = prev;
 		prev = prev->previous;
 		r600_resource_reference(&qbuf->buf, NULL);
 		FREE(qbuf);
@@ -518,8 +519,8 @@ void si_query_hw_destroy(struct si_screen *sscreen,
 	FREE(rquery);
 }
 
-static struct r600_resource *r600_new_query_buffer(struct si_screen *sscreen,
-						   struct r600_query_hw *query)
+static struct r600_resource *si_new_query_buffer(struct si_screen *sscreen,
+						 struct si_query_hw *query)
 {
 	unsigned buf_size = MAX2(query->result_size,
 				 sscreen->info.min_alloc_size);
@@ -542,9 +543,9 @@ static struct r600_resource *r600_new_query_buffer(struct si_screen *sscreen,
 	return buf;
 }
 
-static bool r600_query_hw_prepare_buffer(struct si_screen *sscreen,
-					 struct r600_query_hw *query,
-					 struct r600_resource *buffer)
+static bool si_query_hw_prepare_buffer(struct si_screen *sscreen,
+				       struct si_query_hw *query,
+				       struct r600_resource *buffer)
 {
 	/* Callers ensure that the buffer is currently unused by the GPU. */
 	uint32_t *results = sscreen->ws->buffer_map(buffer->buf, NULL,
@@ -579,59 +580,59 @@ static bool r600_query_hw_prepare_buffer(struct si_screen *sscreen,
 	return true;
 }
 
-static void r600_query_hw_get_result_resource(struct r600_common_context *rctx,
-                                              struct r600_query *rquery,
-                                              bool wait,
-                                              enum pipe_query_value_type result_type,
-                                              int index,
-                                              struct pipe_resource *resource,
-                                              unsigned offset);
+static void si_query_hw_get_result_resource(struct si_context *sctx,
+					    struct si_query *rquery,
+					    bool wait,
+					    enum pipe_query_value_type result_type,
+					    int index,
+					    struct pipe_resource *resource,
+					    unsigned offset);
 
-static struct r600_query_ops query_hw_ops = {
+static struct si_query_ops query_hw_ops = {
 	.destroy = si_query_hw_destroy,
 	.begin = si_query_hw_begin,
 	.end = si_query_hw_end,
 	.get_result = si_query_hw_get_result,
-	.get_result_resource = r600_query_hw_get_result_resource,
+	.get_result_resource = si_query_hw_get_result_resource,
 };
 
-static void r600_query_hw_do_emit_start(struct r600_common_context *ctx,
-					struct r600_query_hw *query,
-					struct r600_resource *buffer,
-					uint64_t va);
-static void r600_query_hw_do_emit_stop(struct r600_common_context *ctx,
-				       struct r600_query_hw *query,
-				       struct r600_resource *buffer,
-				       uint64_t va);
-static void r600_query_hw_add_result(struct si_screen *sscreen,
-				     struct r600_query_hw *, void *buffer,
-				     union pipe_query_result *result);
-static void r600_query_hw_clear_result(struct r600_query_hw *,
-				       union pipe_query_result *);
+static void si_query_hw_do_emit_start(struct si_context *sctx,
+				      struct si_query_hw *query,
+				      struct r600_resource *buffer,
+				      uint64_t va);
+static void si_query_hw_do_emit_stop(struct si_context *sctx,
+				     struct si_query_hw *query,
+				     struct r600_resource *buffer,
+				     uint64_t va);
+static void si_query_hw_add_result(struct si_screen *sscreen,
+				   struct si_query_hw *, void *buffer,
+				   union pipe_query_result *result);
+static void si_query_hw_clear_result(struct si_query_hw *,
+				     union pipe_query_result *);
 
-static struct r600_query_hw_ops query_hw_default_hw_ops = {
-	.prepare_buffer = r600_query_hw_prepare_buffer,
-	.emit_start = r600_query_hw_do_emit_start,
-	.emit_stop = r600_query_hw_do_emit_stop,
-	.clear_result = r600_query_hw_clear_result,
-	.add_result = r600_query_hw_add_result,
+static struct si_query_hw_ops query_hw_default_hw_ops = {
+	.prepare_buffer = si_query_hw_prepare_buffer,
+	.emit_start = si_query_hw_do_emit_start,
+	.emit_stop = si_query_hw_do_emit_stop,
+	.clear_result = si_query_hw_clear_result,
+	.add_result = si_query_hw_add_result,
 };
 
 bool si_query_hw_init(struct si_screen *sscreen,
-		      struct r600_query_hw *query)
+		      struct si_query_hw *query)
 {
-	query->buffer.buf = r600_new_query_buffer(sscreen, query);
+	query->buffer.buf = si_new_query_buffer(sscreen, query);
 	if (!query->buffer.buf)
 		return false;
 
 	return true;
 }
 
-static struct pipe_query *r600_query_hw_create(struct si_screen *sscreen,
-					       unsigned query_type,
-					       unsigned index)
+static struct pipe_query *si_query_hw_create(struct si_screen *sscreen,
+					     unsigned query_type,
+					     unsigned index)
 {
-	struct r600_query_hw *query = CALLOC_STRUCT(r600_query_hw);
+	struct si_query_hw *query = CALLOC_STRUCT(si_query_hw);
 	if (!query)
 		return NULL;
 
@@ -645,18 +646,16 @@ static struct pipe_query *r600_query_hw_create(struct si_screen *sscreen,
 	case PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE:
 		query->result_size = 16 * sscreen->info.num_render_backends;
 		query->result_size += 16; /* for the fence + alignment */
-		query->num_cs_dw_begin = 6;
 		query->num_cs_dw_end = 6 + si_gfx_write_fence_dwords(sscreen);
 		break;
 	case PIPE_QUERY_TIME_ELAPSED:
 		query->result_size = 24;
-		query->num_cs_dw_begin = 8;
 		query->num_cs_dw_end = 8 + si_gfx_write_fence_dwords(sscreen);
 		break;
 	case PIPE_QUERY_TIMESTAMP:
 		query->result_size = 16;
 		query->num_cs_dw_end = 8 + si_gfx_write_fence_dwords(sscreen);
-		query->flags = R600_QUERY_HW_FLAG_NO_START;
+		query->flags = SI_QUERY_HW_FLAG_NO_START;
 		break;
 	case PIPE_QUERY_PRIMITIVES_EMITTED:
 	case PIPE_QUERY_PRIMITIVES_GENERATED:
@@ -664,21 +663,18 @@ static struct pipe_query *r600_query_hw_create(struct si_screen *sscreen,
 	case PIPE_QUERY_SO_OVERFLOW_PREDICATE:
 		/* NumPrimitivesWritten, PrimitiveStorageNeeded. */
 		query->result_size = 32;
-		query->num_cs_dw_begin = 6;
 		query->num_cs_dw_end = 6;
 		query->stream = index;
 		break;
 	case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
 		/* NumPrimitivesWritten, PrimitiveStorageNeeded. */
-		query->result_size = 32 * R600_MAX_STREAMS;
-		query->num_cs_dw_begin = 6 * R600_MAX_STREAMS;
-		query->num_cs_dw_end = 6 * R600_MAX_STREAMS;
+		query->result_size = 32 * SI_MAX_STREAMS;
+		query->num_cs_dw_end = 6 * SI_MAX_STREAMS;
 		break;
 	case PIPE_QUERY_PIPELINE_STATISTICS:
 		/* 11 values on GCN. */
 		query->result_size = 11 * 16;
 		query->result_size += 8; /* for the fence + alignment */
-		query->num_cs_dw_begin = 6;
 		query->num_cs_dw_end = 6 + si_gfx_write_fence_dwords(sscreen);
 		break;
 	default:
@@ -695,31 +691,30 @@ static struct pipe_query *r600_query_hw_create(struct si_screen *sscreen,
 	return (struct pipe_query *)query;
 }
 
-static void r600_update_occlusion_query_state(struct r600_common_context *rctx,
-					      unsigned type, int diff)
+static void si_update_occlusion_query_state(struct si_context *sctx,
+					    unsigned type, int diff)
 {
 	if (type == PIPE_QUERY_OCCLUSION_COUNTER ||
 	    type == PIPE_QUERY_OCCLUSION_PREDICATE ||
 	    type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE) {
-		bool old_enable = rctx->num_occlusion_queries != 0;
+		bool old_enable = sctx->num_occlusion_queries != 0;
 		bool old_perfect_enable =
-			rctx->num_perfect_occlusion_queries != 0;
+			sctx->num_perfect_occlusion_queries != 0;
 		bool enable, perfect_enable;
 
-		rctx->num_occlusion_queries += diff;
-		assert(rctx->num_occlusion_queries >= 0);
+		sctx->num_occlusion_queries += diff;
+		assert(sctx->num_occlusion_queries >= 0);
 
 		if (type != PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE) {
-			rctx->num_perfect_occlusion_queries += diff;
-			assert(rctx->num_perfect_occlusion_queries >= 0);
+			sctx->num_perfect_occlusion_queries += diff;
+			assert(sctx->num_perfect_occlusion_queries >= 0);
 		}
 
-		enable = rctx->num_occlusion_queries != 0;
-		perfect_enable = rctx->num_perfect_occlusion_queries != 0;
+		enable = sctx->num_occlusion_queries != 0;
+		perfect_enable = sctx->num_perfect_occlusion_queries != 0;
 
 		if (enable != old_enable || perfect_enable != old_perfect_enable) {
-			rctx->set_occlusion_query_state(&rctx->b, old_enable,
-							old_perfect_enable);
+			si_set_occlusion_query_state(sctx, old_perfect_enable);
 		}
 	}
 }
@@ -744,12 +739,12 @@ static void emit_sample_streamout(struct radeon_winsys_cs *cs, uint64_t va,
 	radeon_emit(cs, va >> 32);
 }
 
-static void r600_query_hw_do_emit_start(struct r600_common_context *ctx,
-					struct r600_query_hw *query,
+static void si_query_hw_do_emit_start(struct si_context *sctx,
+					struct si_query_hw *query,
 					struct r600_resource *buffer,
 					uint64_t va)
 {
-	struct radeon_winsys_cs *cs = ctx->gfx.cs;
+	struct radeon_winsys_cs *cs = sctx->gfx_cs;
 
 	switch (query->b.type) {
 	case PIPE_QUERY_OCCLUSION_COUNTER:
@@ -767,7 +762,7 @@ static void r600_query_hw_do_emit_start(struct r600_common_context *ctx,
 		emit_sample_streamout(cs, va, query->stream);
 		break;
 	case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
-		for (unsigned stream = 0; stream < R600_MAX_STREAMS; ++stream)
+		for (unsigned stream = 0; stream < SI_MAX_STREAMS; ++stream)
 			emit_sample_streamout(cs, va + 32 * stream, stream);
 		break;
 	case PIPE_QUERY_TIME_ELAPSED:
@@ -792,31 +787,30 @@ static void r600_query_hw_do_emit_start(struct r600_common_context *ctx,
 	default:
 		assert(0);
 	}
-	radeon_add_to_buffer_list(ctx, &ctx->gfx, query->buffer.buf, RADEON_USAGE_WRITE,
+	radeon_add_to_buffer_list(sctx, sctx->gfx_cs, query->buffer.buf, RADEON_USAGE_WRITE,
 				  RADEON_PRIO_QUERY);
 }
 
-static void r600_query_hw_emit_start(struct r600_common_context *ctx,
-				     struct r600_query_hw *query)
+static void si_query_hw_emit_start(struct si_context *sctx,
+				   struct si_query_hw *query)
 {
 	uint64_t va;
 
 	if (!query->buffer.buf)
 		return; // previous buffer allocation failure
 
-	r600_update_occlusion_query_state(ctx, query->b.type, 1);
-	si_update_prims_generated_query_state((void*)ctx, query->b.type, 1);
+	si_update_occlusion_query_state(sctx, query->b.type, 1);
+	si_update_prims_generated_query_state(sctx, query->b.type, 1);
 
-	ctx->need_gfx_cs_space(&ctx->b, query->num_cs_dw_begin + query->num_cs_dw_end,
-			       true);
+	si_need_gfx_cs_space(sctx);
 
 	/* Get a new query buffer if needed. */
 	if (query->buffer.results_end + query->result_size > query->buffer.buf->b.b.width0) {
-		struct r600_query_buffer *qbuf = MALLOC_STRUCT(r600_query_buffer);
+		struct si_query_buffer *qbuf = MALLOC_STRUCT(si_query_buffer);
 		*qbuf = query->buffer;
 		query->buffer.results_end = 0;
 		query->buffer.previous = qbuf;
-		query->buffer.buf = r600_new_query_buffer(ctx->screen, query);
+		query->buffer.buf = si_new_query_buffer(sctx->screen, query);
 		if (!query->buffer.buf)
 			return;
 	}
@@ -824,17 +818,17 @@ static void r600_query_hw_emit_start(struct r600_common_context *ctx,
 	/* emit begin query */
 	va = query->buffer.buf->gpu_address + query->buffer.results_end;
 
-	query->ops->emit_start(ctx, query, query->buffer.buf, va);
+	query->ops->emit_start(sctx, query, query->buffer.buf, va);
 
-	ctx->num_cs_dw_queries_suspend += query->num_cs_dw_end;
+	sctx->num_cs_dw_queries_suspend += query->num_cs_dw_end;
 }
 
-static void r600_query_hw_do_emit_stop(struct r600_common_context *ctx,
-				       struct r600_query_hw *query,
+static void si_query_hw_do_emit_stop(struct si_context *sctx,
+				       struct si_query_hw *query,
 				       struct r600_resource *buffer,
 				       uint64_t va)
 {
-	struct radeon_winsys_cs *cs = ctx->gfx.cs;
+	struct radeon_winsys_cs *cs = sctx->gfx_cs;
 	uint64_t fence_va = 0;
 
 	switch (query->b.type) {
@@ -847,7 +841,7 @@ static void r600_query_hw_do_emit_stop(struct r600_common_context *ctx,
 		radeon_emit(cs, va);
 		radeon_emit(cs, va >> 32);
 
-		fence_va = va + ctx->screen->info.num_render_backends * 16 - 8;
+		fence_va = va + sctx->screen->info.num_render_backends * 16 - 8;
 		break;
 	case PIPE_QUERY_PRIMITIVES_EMITTED:
 	case PIPE_QUERY_PRIMITIVES_GENERATED:
@@ -858,16 +852,16 @@ static void r600_query_hw_do_emit_stop(struct r600_common_context *ctx,
 		break;
 	case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
 		va += 16;
-		for (unsigned stream = 0; stream < R600_MAX_STREAMS; ++stream)
+		for (unsigned stream = 0; stream < SI_MAX_STREAMS; ++stream)
 			emit_sample_streamout(cs, va + 32 * stream, stream);
 		break;
 	case PIPE_QUERY_TIME_ELAPSED:
 		va += 8;
 		/* fall through */
 	case PIPE_QUERY_TIMESTAMP:
-		si_gfx_write_event_eop(ctx, V_028A90_BOTTOM_OF_PIPE_TS,
-					 0, EOP_DATA_SEL_TIMESTAMP, NULL, va,
-					 0, query->b.type);
+		si_gfx_write_event_eop(sctx, V_028A90_BOTTOM_OF_PIPE_TS,
+				       0, EOP_DATA_SEL_TIMESTAMP, NULL, va,
+				       0, query->b.type);
 		fence_va = va + 8;
 		break;
 	case PIPE_QUERY_PIPELINE_STATISTICS: {
@@ -885,18 +879,18 @@ static void r600_query_hw_do_emit_stop(struct r600_common_context *ctx,
 	default:
 		assert(0);
 	}
-	radeon_add_to_buffer_list(ctx, &ctx->gfx, query->buffer.buf, RADEON_USAGE_WRITE,
+	radeon_add_to_buffer_list(sctx, sctx->gfx_cs, query->buffer.buf, RADEON_USAGE_WRITE,
 				  RADEON_PRIO_QUERY);
 
 	if (fence_va)
-		si_gfx_write_event_eop(ctx, V_028A90_BOTTOM_OF_PIPE_TS, 0,
-					 EOP_DATA_SEL_VALUE_32BIT,
-					 query->buffer.buf, fence_va, 0x80000000,
-					 query->b.type);
+		si_gfx_write_event_eop(sctx, V_028A90_BOTTOM_OF_PIPE_TS, 0,
+				       EOP_DATA_SEL_VALUE_32BIT,
+				       query->buffer.buf, fence_va, 0x80000000,
+				       query->b.type);
 }
 
-static void r600_query_hw_emit_stop(struct r600_common_context *ctx,
-				    struct r600_query_hw *query)
+static void si_query_hw_emit_stop(struct si_context *sctx,
+				  struct si_query_hw *query)
 {
 	uint64_t va;
 
@@ -904,29 +898,28 @@ static void r600_query_hw_emit_stop(struct r600_common_context *ctx,
 		return; // previous buffer allocation failure
 
 	/* The queries which need begin already called this in begin_query. */
-	if (query->flags & R600_QUERY_HW_FLAG_NO_START) {
-		ctx->need_gfx_cs_space(&ctx->b, query->num_cs_dw_end, false);
-	}
+	if (query->flags & SI_QUERY_HW_FLAG_NO_START)
+		si_need_gfx_cs_space(sctx);
 
 	/* emit end query */
 	va = query->buffer.buf->gpu_address + query->buffer.results_end;
 
-	query->ops->emit_stop(ctx, query, query->buffer.buf, va);
+	query->ops->emit_stop(sctx, query, query->buffer.buf, va);
 
 	query->buffer.results_end += query->result_size;
 
-	if (!(query->flags & R600_QUERY_HW_FLAG_NO_START))
-		ctx->num_cs_dw_queries_suspend -= query->num_cs_dw_end;
+	if (!(query->flags & SI_QUERY_HW_FLAG_NO_START))
+		sctx->num_cs_dw_queries_suspend -= query->num_cs_dw_end;
 
-	r600_update_occlusion_query_state(ctx, query->b.type, -1);
-	si_update_prims_generated_query_state((void*)ctx, query->b.type, -1);
+	si_update_occlusion_query_state(sctx, query->b.type, -1);
+	si_update_prims_generated_query_state(sctx, query->b.type, -1);
 }
 
-static void emit_set_predicate(struct r600_common_context *ctx,
+static void emit_set_predicate(struct si_context *ctx,
 			       struct r600_resource *buf, uint64_t va,
 			       uint32_t op)
 {
-	struct radeon_winsys_cs *cs = ctx->gfx.cs;
+	struct radeon_winsys_cs *cs = ctx->gfx_cs;
 
 	if (ctx->chip_class >= GFX9) {
 		radeon_emit(cs, PKT3(PKT3_SET_PREDICATION, 2, 0));
@@ -938,15 +931,15 @@ static void emit_set_predicate(struct r600_common_context *ctx,
 		radeon_emit(cs, va);
 		radeon_emit(cs, op | ((va >> 32) & 0xFF));
 	}
-	radeon_add_to_buffer_list(ctx, &ctx->gfx, buf, RADEON_USAGE_READ,
+	radeon_add_to_buffer_list(ctx, ctx->gfx_cs, buf, RADEON_USAGE_READ,
 				  RADEON_PRIO_QUERY);
 }
 
-static void r600_emit_query_predication(struct r600_common_context *ctx,
-					struct r600_atom *atom)
+static void si_emit_query_predication(struct si_context *ctx,
+				      struct r600_atom *atom)
 {
-	struct r600_query_hw *query = (struct r600_query_hw *)ctx->render_cond;
-	struct r600_query_buffer *qbuf;
+	struct si_query_hw *query = (struct si_query_hw *)ctx->render_cond;
+	struct si_query_buffer *qbuf;
 	uint32_t op;
 	bool flag_wait, invert;
 
@@ -1007,7 +1000,7 @@ static void r600_emit_query_predication(struct r600_common_context *ctx,
 			uint64_t va = va_base + results_base;
 
 			if (query->b.type == PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE) {
-				for (unsigned stream = 0; stream < R600_MAX_STREAMS; ++stream) {
+				for (unsigned stream = 0; stream < SI_MAX_STREAMS; ++stream) {
 					emit_set_predicate(ctx, qbuf->buf, va + 32 * stream, op);
 
 					/* set CONTINUE bit for all packets except the first */
@@ -1023,7 +1016,7 @@ static void r600_emit_query_predication(struct r600_common_context *ctx,
 	}
 }
 
-static struct pipe_query *r600_create_query(struct pipe_context *ctx, unsigned query_type, unsigned index)
+static struct pipe_query *si_create_query(struct pipe_context *ctx, unsigned query_type, unsigned index)
 {
 	struct si_screen *sscreen =
 		(struct si_screen *)ctx->screen;
@@ -1031,36 +1024,36 @@ static struct pipe_query *r600_create_query(struct pipe_context *ctx, unsigned q
 	if (query_type == PIPE_QUERY_TIMESTAMP_DISJOINT ||
 	    query_type == PIPE_QUERY_GPU_FINISHED ||
 	    query_type >= PIPE_QUERY_DRIVER_SPECIFIC)
-		return r600_query_sw_create(query_type);
+		return si_query_sw_create(query_type);
 
-	return r600_query_hw_create(sscreen, query_type, index);
+	return si_query_hw_create(sscreen, query_type, index);
 }
 
-static void r600_destroy_query(struct pipe_context *ctx, struct pipe_query *query)
+static void si_destroy_query(struct pipe_context *ctx, struct pipe_query *query)
 {
-	struct r600_common_context *rctx = (struct r600_common_context *)ctx;
-	struct r600_query *rquery = (struct r600_query *)query;
+	struct si_context *sctx = (struct si_context *)ctx;
+	struct si_query *rquery = (struct si_query *)query;
 
-	rquery->ops->destroy(rctx->screen, rquery);
+	rquery->ops->destroy(sctx->screen, rquery);
 }
 
-static boolean r600_begin_query(struct pipe_context *ctx,
+static boolean si_begin_query(struct pipe_context *ctx,
                                 struct pipe_query *query)
 {
-	struct r600_common_context *rctx = (struct r600_common_context *)ctx;
-	struct r600_query *rquery = (struct r600_query *)query;
+	struct si_context *sctx = (struct si_context *)ctx;
+	struct si_query *rquery = (struct si_query *)query;
 
-	return rquery->ops->begin(rctx, rquery);
+	return rquery->ops->begin(sctx, rquery);
 }
 
-void si_query_hw_reset_buffers(struct r600_common_context *rctx,
-			       struct r600_query_hw *query)
+void si_query_hw_reset_buffers(struct si_context *sctx,
+			       struct si_query_hw *query)
 {
-	struct r600_query_buffer *prev = query->buffer.previous;
+	struct si_query_buffer *prev = query->buffer.previous;
 
 	/* Discard the old query buffers. */
 	while (prev) {
-		struct r600_query_buffer *qbuf = prev;
+		struct si_query_buffer *qbuf = prev;
 		prev = prev->previous;
 		r600_resource_reference(&qbuf->buf, NULL);
 		FREE(qbuf);
@@ -1070,58 +1063,58 @@ void si_query_hw_reset_buffers(struct r600_common_context *rctx,
 	query->buffer.previous = NULL;
 
 	/* Obtain a new buffer if the current one can't be mapped without a stall. */
-	if (si_rings_is_buffer_referenced(rctx, query->buffer.buf->buf, RADEON_USAGE_READWRITE) ||
-	    !rctx->ws->buffer_wait(query->buffer.buf->buf, 0, RADEON_USAGE_READWRITE)) {
+	if (si_rings_is_buffer_referenced(sctx, query->buffer.buf->buf, RADEON_USAGE_READWRITE) ||
+	    !sctx->ws->buffer_wait(query->buffer.buf->buf, 0, RADEON_USAGE_READWRITE)) {
 		r600_resource_reference(&query->buffer.buf, NULL);
-		query->buffer.buf = r600_new_query_buffer(rctx->screen, query);
+		query->buffer.buf = si_new_query_buffer(sctx->screen, query);
 	} else {
-		if (!query->ops->prepare_buffer(rctx->screen, query, query->buffer.buf))
+		if (!query->ops->prepare_buffer(sctx->screen, query, query->buffer.buf))
 			r600_resource_reference(&query->buffer.buf, NULL);
 	}
 }
 
-bool si_query_hw_begin(struct r600_common_context *rctx,
-		       struct r600_query *rquery)
+bool si_query_hw_begin(struct si_context *sctx,
+		       struct si_query *rquery)
 {
-	struct r600_query_hw *query = (struct r600_query_hw *)rquery;
+	struct si_query_hw *query = (struct si_query_hw *)rquery;
 
-	if (query->flags & R600_QUERY_HW_FLAG_NO_START) {
+	if (query->flags & SI_QUERY_HW_FLAG_NO_START) {
 		assert(0);
 		return false;
 	}
 
-	if (!(query->flags & R600_QUERY_HW_FLAG_BEGIN_RESUMES))
-		si_query_hw_reset_buffers(rctx, query);
+	if (!(query->flags & SI_QUERY_HW_FLAG_BEGIN_RESUMES))
+		si_query_hw_reset_buffers(sctx, query);
 
 	r600_resource_reference(&query->workaround_buf, NULL);
 
-	r600_query_hw_emit_start(rctx, query);
+	si_query_hw_emit_start(sctx, query);
 	if (!query->buffer.buf)
 		return false;
 
-	LIST_ADDTAIL(&query->list, &rctx->active_queries);
+	LIST_ADDTAIL(&query->list, &sctx->active_queries);
 	return true;
 }
 
-static bool r600_end_query(struct pipe_context *ctx, struct pipe_query *query)
+static bool si_end_query(struct pipe_context *ctx, struct pipe_query *query)
 {
-	struct r600_common_context *rctx = (struct r600_common_context *)ctx;
-	struct r600_query *rquery = (struct r600_query *)query;
+	struct si_context *sctx = (struct si_context *)ctx;
+	struct si_query *rquery = (struct si_query *)query;
 
-	return rquery->ops->end(rctx, rquery);
+	return rquery->ops->end(sctx, rquery);
 }
 
-bool si_query_hw_end(struct r600_common_context *rctx,
-		     struct r600_query *rquery)
+bool si_query_hw_end(struct si_context *sctx,
+		     struct si_query *rquery)
 {
-	struct r600_query_hw *query = (struct r600_query_hw *)rquery;
+	struct si_query_hw *query = (struct si_query_hw *)rquery;
 
-	if (query->flags & R600_QUERY_HW_FLAG_NO_START)
-		si_query_hw_reset_buffers(rctx, query);
+	if (query->flags & SI_QUERY_HW_FLAG_NO_START)
+		si_query_hw_reset_buffers(sctx, query);
 
-	r600_query_hw_emit_stop(rctx, query);
+	si_query_hw_emit_stop(sctx, query);
 
-	if (!(query->flags & R600_QUERY_HW_FLAG_NO_START))
+	if (!(query->flags & SI_QUERY_HW_FLAG_NO_START))
 		LIST_DELINIT(&query->list);
 
 	if (!query->buffer.buf)
@@ -1130,11 +1123,11 @@ bool si_query_hw_end(struct r600_common_context *rctx,
 	return true;
 }
 
-static void r600_get_hw_query_params(struct r600_common_context *rctx,
-				     struct r600_query_hw *rquery, int index,
-				     struct r600_hw_query_params *params)
+static void si_get_hw_query_params(struct si_context *sctx,
+				   struct si_query_hw *rquery, int index,
+				   struct si_hw_query_params *params)
 {
-	unsigned max_rbs = rctx->screen->info.num_render_backends;
+	unsigned max_rbs = sctx->screen->info.num_render_backends;
 
 	params->pair_stride = 0;
 	params->pair_count = 1;
@@ -1175,7 +1168,7 @@ static void r600_get_hw_query_params(struct r600_common_context *rctx,
 		params->fence_offset = params->end_offset + 4;
 		break;
 	case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
-		params->pair_count = R600_MAX_STREAMS;
+		params->pair_count = SI_MAX_STREAMS;
 		params->pair_stride = 32;
 	case PIPE_QUERY_SO_OVERFLOW_PREDICATE:
 		params->start_offset = 0;
@@ -1197,12 +1190,12 @@ static void r600_get_hw_query_params(struct r600_common_context *rctx,
 		break;
 	}
 	default:
-		unreachable("r600_get_hw_query_params unsupported");
+		unreachable("si_get_hw_query_params unsupported");
 	}
 }
 
-static unsigned r600_query_read_result(void *map, unsigned start_index, unsigned end_index,
-				       bool test_status_bit)
+static unsigned si_query_read_result(void *map, unsigned start_index, unsigned end_index,
+				     bool test_status_bit)
 {
 	uint32_t *current_result = (uint32_t*)map;
 	uint64_t start, end;
@@ -1219,8 +1212,8 @@ static unsigned r600_query_read_result(void *map, unsigned start_index, unsigned
 	return 0;
 }
 
-static void r600_query_hw_add_result(struct si_screen *sscreen,
-				     struct r600_query_hw *query,
+static void si_query_hw_add_result(struct si_screen *sscreen,
+				     struct si_query_hw *query,
 				     void *buffer,
 				     union pipe_query_result *result)
 {
@@ -1231,7 +1224,7 @@ static void r600_query_hw_add_result(struct si_screen *sscreen,
 		for (unsigned i = 0; i < max_rbs; ++i) {
 			unsigned results_base = i * 16;
 			result->u64 +=
-				r600_query_read_result(buffer + results_base, 0, 2, true);
+				si_query_read_result(buffer + results_base, 0, 2, true);
 		}
 		break;
 	}
@@ -1240,12 +1233,12 @@ static void r600_query_hw_add_result(struct si_screen *sscreen,
 		for (unsigned i = 0; i < max_rbs; ++i) {
 			unsigned results_base = i * 16;
 			result->b = result->b ||
-				r600_query_read_result(buffer + results_base, 0, 2, true) != 0;
+				si_query_read_result(buffer + results_base, 0, 2, true) != 0;
 		}
 		break;
 	}
 	case PIPE_QUERY_TIME_ELAPSED:
-		result->u64 += r600_query_read_result(buffer, 0, 2, false);
+		result->u64 += si_query_read_result(buffer, 0, 2, false);
 		break;
 	case PIPE_QUERY_TIMESTAMP:
 		result->u64 = *(uint64_t*)buffer;
@@ -1257,54 +1250,54 @@ static void r600_query_hw_add_result(struct si_screen *sscreen,
 		 *    u64 PrimitiveStorageNeeded;
 		 * }
 		 * We only need NumPrimitivesWritten here. */
-		result->u64 += r600_query_read_result(buffer, 2, 6, true);
+		result->u64 += si_query_read_result(buffer, 2, 6, true);
 		break;
 	case PIPE_QUERY_PRIMITIVES_GENERATED:
 		/* Here we read PrimitiveStorageNeeded. */
-		result->u64 += r600_query_read_result(buffer, 0, 4, true);
+		result->u64 += si_query_read_result(buffer, 0, 4, true);
 		break;
 	case PIPE_QUERY_SO_STATISTICS:
 		result->so_statistics.num_primitives_written +=
-			r600_query_read_result(buffer, 2, 6, true);
+			si_query_read_result(buffer, 2, 6, true);
 		result->so_statistics.primitives_storage_needed +=
-			r600_query_read_result(buffer, 0, 4, true);
+			si_query_read_result(buffer, 0, 4, true);
 		break;
 	case PIPE_QUERY_SO_OVERFLOW_PREDICATE:
 		result->b = result->b ||
-			r600_query_read_result(buffer, 2, 6, true) !=
-			r600_query_read_result(buffer, 0, 4, true);
+			si_query_read_result(buffer, 2, 6, true) !=
+			si_query_read_result(buffer, 0, 4, true);
 		break;
 	case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
-		for (unsigned stream = 0; stream < R600_MAX_STREAMS; ++stream) {
+		for (unsigned stream = 0; stream < SI_MAX_STREAMS; ++stream) {
 			result->b = result->b ||
-				r600_query_read_result(buffer, 2, 6, true) !=
-				r600_query_read_result(buffer, 0, 4, true);
+				si_query_read_result(buffer, 2, 6, true) !=
+				si_query_read_result(buffer, 0, 4, true);
 			buffer = (char *)buffer + 32;
 		}
 		break;
 	case PIPE_QUERY_PIPELINE_STATISTICS:
 		result->pipeline_statistics.ps_invocations +=
-			r600_query_read_result(buffer, 0, 22, false);
+			si_query_read_result(buffer, 0, 22, false);
 		result->pipeline_statistics.c_primitives +=
-			r600_query_read_result(buffer, 2, 24, false);
+			si_query_read_result(buffer, 2, 24, false);
 		result->pipeline_statistics.c_invocations +=
-			r600_query_read_result(buffer, 4, 26, false);
+			si_query_read_result(buffer, 4, 26, false);
 		result->pipeline_statistics.vs_invocations +=
-			r600_query_read_result(buffer, 6, 28, false);
+			si_query_read_result(buffer, 6, 28, false);
 		result->pipeline_statistics.gs_invocations +=
-			r600_query_read_result(buffer, 8, 30, false);
+			si_query_read_result(buffer, 8, 30, false);
 		result->pipeline_statistics.gs_primitives +=
-			r600_query_read_result(buffer, 10, 32, false);
+			si_query_read_result(buffer, 10, 32, false);
 		result->pipeline_statistics.ia_primitives +=
-			r600_query_read_result(buffer, 12, 34, false);
+			si_query_read_result(buffer, 12, 34, false);
 		result->pipeline_statistics.ia_vertices +=
-			r600_query_read_result(buffer, 14, 36, false);
+			si_query_read_result(buffer, 14, 36, false);
 		result->pipeline_statistics.hs_invocations +=
-			r600_query_read_result(buffer, 16, 38, false);
+			si_query_read_result(buffer, 16, 38, false);
 		result->pipeline_statistics.ds_invocations +=
-			r600_query_read_result(buffer, 18, 40, false);
+			si_query_read_result(buffer, 18, 40, false);
 		result->pipeline_statistics.cs_invocations +=
-			r600_query_read_result(buffer, 20, 42, false);
+			si_query_read_result(buffer, 20, 42, false);
 #if 0 /* for testing */
 		printf("Pipeline stats: IA verts=%llu, IA prims=%llu, VS=%llu, HS=%llu, "
 		       "DS=%llu, GS=%llu, GS prims=%llu, Clipper=%llu, "
@@ -1327,44 +1320,44 @@ static void r600_query_hw_add_result(struct si_screen *sscreen,
 	}
 }
 
-static boolean r600_get_query_result(struct pipe_context *ctx,
-				     struct pipe_query *query, boolean wait,
-				     union pipe_query_result *result)
+static boolean si_get_query_result(struct pipe_context *ctx,
+				   struct pipe_query *query, boolean wait,
+				   union pipe_query_result *result)
 {
-	struct r600_common_context *rctx = (struct r600_common_context *)ctx;
-	struct r600_query *rquery = (struct r600_query *)query;
+	struct si_context *sctx = (struct si_context *)ctx;
+	struct si_query *rquery = (struct si_query *)query;
 
-	return rquery->ops->get_result(rctx, rquery, wait, result);
+	return rquery->ops->get_result(sctx, rquery, wait, result);
 }
 
-static void r600_get_query_result_resource(struct pipe_context *ctx,
-                                           struct pipe_query *query,
-                                           boolean wait,
-                                           enum pipe_query_value_type result_type,
-                                           int index,
-                                           struct pipe_resource *resource,
-                                           unsigned offset)
+static void si_get_query_result_resource(struct pipe_context *ctx,
+					 struct pipe_query *query,
+					 boolean wait,
+					 enum pipe_query_value_type result_type,
+					 int index,
+					 struct pipe_resource *resource,
+					 unsigned offset)
 {
-	struct r600_common_context *rctx = (struct r600_common_context *)ctx;
-	struct r600_query *rquery = (struct r600_query *)query;
+	struct si_context *sctx = (struct si_context *)ctx;
+	struct si_query *rquery = (struct si_query *)query;
 
-	rquery->ops->get_result_resource(rctx, rquery, wait, result_type, index,
+	rquery->ops->get_result_resource(sctx, rquery, wait, result_type, index,
 	                                 resource, offset);
 }
 
-static void r600_query_hw_clear_result(struct r600_query_hw *query,
+static void si_query_hw_clear_result(struct si_query_hw *query,
 				       union pipe_query_result *result)
 {
 	util_query_clear_result(result, query->b.type);
 }
 
-bool si_query_hw_get_result(struct r600_common_context *rctx,
-			    struct r600_query *rquery,
+bool si_query_hw_get_result(struct si_context *sctx,
+			    struct si_query *rquery,
 			    bool wait, union pipe_query_result *result)
 {
-	struct si_screen *sscreen = rctx->screen;
-	struct r600_query_hw *query = (struct r600_query_hw *)rquery;
-	struct r600_query_buffer *qbuf;
+	struct si_screen *sscreen = sctx->screen;
+	struct si_query_hw *query = (struct si_query_hw *)rquery;
+	struct si_query_buffer *qbuf;
 
 	query->ops->clear_result(query, result);
 
@@ -1375,9 +1368,9 @@ bool si_query_hw_get_result(struct r600_common_context *rctx,
 		void *map;
 
 		if (rquery->b.flushed)
-			map = rctx->ws->buffer_map(qbuf->buf->buf, NULL, usage);
+			map = sctx->ws->buffer_map(qbuf->buf->buf, NULL, usage);
 		else
-			map = si_buffer_map_sync_with_rings(rctx, qbuf->buf, usage);
+			map = si_buffer_map_sync_with_rings(sctx, qbuf->buf, usage);
 
 		if (!map)
 			return false;
@@ -1429,7 +1422,7 @@ bool si_query_hw_get_result(struct r600_common_context *rctx,
  * BUFFER[1] = previous summary buffer
  * BUFFER[2] = next summary buffer or user-supplied buffer
  */
-static void r600_create_query_result_shader(struct r600_common_context *rctx)
+static void si_create_query_result_shader(struct si_context *sctx)
 {
 	/* TEMP[0].xy = accumulated result so far
 	 * TEMP[0].z = result not available
@@ -1600,7 +1593,7 @@ static void r600_create_query_result_shader(struct r600_common_context *rctx)
 	 * use the full range of optimizations for divide-by-constant.
 	 */
 	snprintf(text, sizeof(text), text_tmpl,
-		 rctx->screen->info.clock_crystal_freq);
+		 sctx->screen->info.clock_crystal_freq);
 
 	if (!tgsi_text_translate(text, tokens, ARRAY_SIZE(tokens))) {
 		assert(false);
@@ -1610,40 +1603,40 @@ static void r600_create_query_result_shader(struct r600_common_context *rctx)
 	state.ir_type = PIPE_SHADER_IR_TGSI;
 	state.prog = tokens;
 
-	rctx->query_result_shader = rctx->b.create_compute_state(&rctx->b, &state);
+	sctx->query_result_shader = sctx->b.create_compute_state(&sctx->b, &state);
 }
 
-static void r600_restore_qbo_state(struct r600_common_context *rctx,
-				   struct r600_qbo_state *st)
+static void si_restore_qbo_state(struct si_context *sctx,
+				 struct si_qbo_state *st)
 {
-	rctx->b.bind_compute_state(&rctx->b, st->saved_compute);
+	sctx->b.bind_compute_state(&sctx->b, st->saved_compute);
 
-	rctx->b.set_constant_buffer(&rctx->b, PIPE_SHADER_COMPUTE, 0, &st->saved_const0);
+	sctx->b.set_constant_buffer(&sctx->b, PIPE_SHADER_COMPUTE, 0, &st->saved_const0);
 	pipe_resource_reference(&st->saved_const0.buffer, NULL);
 
-	rctx->b.set_shader_buffers(&rctx->b, PIPE_SHADER_COMPUTE, 0, 3, st->saved_ssbo);
+	sctx->b.set_shader_buffers(&sctx->b, PIPE_SHADER_COMPUTE, 0, 3, st->saved_ssbo);
 	for (unsigned i = 0; i < 3; ++i)
 		pipe_resource_reference(&st->saved_ssbo[i].buffer, NULL);
 }
 
-static void r600_query_hw_get_result_resource(struct r600_common_context *rctx,
-                                              struct r600_query *rquery,
+static void si_query_hw_get_result_resource(struct si_context *sctx,
+                                              struct si_query *rquery,
                                               bool wait,
                                               enum pipe_query_value_type result_type,
                                               int index,
                                               struct pipe_resource *resource,
                                               unsigned offset)
 {
-	struct r600_query_hw *query = (struct r600_query_hw *)rquery;
-	struct r600_query_buffer *qbuf;
-	struct r600_query_buffer *qbuf_prev;
+	struct si_query_hw *query = (struct si_query_hw *)rquery;
+	struct si_query_buffer *qbuf;
+	struct si_query_buffer *qbuf_prev;
 	struct pipe_resource *tmp_buffer = NULL;
 	unsigned tmp_buffer_offset = 0;
-	struct r600_qbo_state saved_state = {};
+	struct si_qbo_state saved_state = {};
 	struct pipe_grid_info grid = {};
 	struct pipe_constant_buffer constant_buffer = {};
 	struct pipe_shader_buffer ssbo[3];
-	struct r600_hw_query_params params;
+	struct si_hw_query_params params;
 	struct {
 		uint32_t end_offset;
 		uint32_t result_stride;
@@ -1654,22 +1647,22 @@ static void r600_query_hw_get_result_resource(struct r600_common_context *rctx,
 		uint32_t pair_count;
 	} consts;
 
-	if (!rctx->query_result_shader) {
-		r600_create_query_result_shader(rctx);
-		if (!rctx->query_result_shader)
+	if (!sctx->query_result_shader) {
+		si_create_query_result_shader(sctx);
+		if (!sctx->query_result_shader)
 			return;
 	}
 
 	if (query->buffer.previous) {
-		u_suballocator_alloc(rctx->allocator_zeroed_memory, 16, 16,
+		u_suballocator_alloc(sctx->allocator_zeroed_memory, 16, 16,
 				     &tmp_buffer_offset, &tmp_buffer);
 		if (!tmp_buffer)
 			return;
 	}
 
-	rctx->save_qbo_state(&rctx->b, &saved_state);
+	si_save_qbo_state(sctx, &saved_state);
 
-	r600_get_hw_query_params(rctx, query, index >= 0 ? index : 0, &params);
+	si_get_hw_query_params(sctx, query, index >= 0 ? index : 0, &params);
 	consts.end_offset = params.end_offset - params.start_offset;
 	consts.fence_offset = params.fence_offset - params.start_offset;
 	consts.result_stride = query->result_size;
@@ -1685,7 +1678,7 @@ static void r600_query_hw_get_result_resource(struct r600_common_context *rctx,
 
 	ssbo[2] = ssbo[1];
 
-	rctx->b.bind_compute_state(&rctx->b, rctx->query_result_shader);
+	sctx->b.bind_compute_state(&sctx->b, sctx->query_result_shader);
 
 	grid.block[0] = 1;
 	grid.block[1] = 1;
@@ -1719,7 +1712,7 @@ static void r600_query_hw_get_result_resource(struct r600_common_context *rctx,
 		break;
 	}
 
-	rctx->flags |= rctx->screen->barrier_flags.cp_to_L2;
+	sctx->flags |= sctx->screen->barrier_flags.cp_to_L2;
 
 	for (qbuf = &query->buffer; qbuf; qbuf = qbuf_prev) {
 		if (query->b.type != PIPE_QUERY_TIMESTAMP) {
@@ -1738,7 +1731,7 @@ static void r600_query_hw_get_result_resource(struct r600_common_context *rctx,
 			params.start_offset += qbuf->results_end - query->result_size;
 		}
 
-		rctx->b.set_constant_buffer(&rctx->b, PIPE_SHADER_COMPUTE, 0, &constant_buffer);
+		sctx->b.set_constant_buffer(&sctx->b, PIPE_SHADER_COMPUTE, 0, &constant_buffer);
 
 		ssbo[0].buffer = &qbuf->buf->b.b;
 		ssbo[0].buffer_offset = params.start_offset;
@@ -1752,7 +1745,7 @@ static void r600_query_hw_get_result_resource(struct r600_common_context *rctx,
 			((struct r600_resource *)resource)->TC_L2_dirty = true;
 		}
 
-		rctx->b.set_shader_buffers(&rctx->b, PIPE_SHADER_COMPUTE, 0, 3, ssbo);
+		sctx->b.set_shader_buffers(&sctx->b, PIPE_SHADER_COMPUTE, 0, 3, ssbo);
 
 		if (wait && qbuf == &query->buffer) {
 			uint64_t va;
@@ -1764,25 +1757,25 @@ static void r600_query_hw_get_result_resource(struct r600_common_context *rctx,
 			va = qbuf->buf->gpu_address + qbuf->results_end - query->result_size;
 			va += params.fence_offset;
 
-			si_gfx_wait_fence(rctx, va, 0x80000000, 0x80000000);
+			si_gfx_wait_fence(sctx, va, 0x80000000, 0x80000000);
 		}
 
-		rctx->b.launch_grid(&rctx->b, &grid);
-		rctx->flags |= SI_CONTEXT_CS_PARTIAL_FLUSH;
+		sctx->b.launch_grid(&sctx->b, &grid);
+		sctx->flags |= SI_CONTEXT_CS_PARTIAL_FLUSH;
 	}
 
-	r600_restore_qbo_state(rctx, &saved_state);
+	si_restore_qbo_state(sctx, &saved_state);
 	pipe_resource_reference(&tmp_buffer, NULL);
 }
 
-static void r600_render_condition(struct pipe_context *ctx,
-				  struct pipe_query *query,
-				  boolean condition,
-				  enum pipe_render_cond_flag mode)
+static void si_render_condition(struct pipe_context *ctx,
+				struct pipe_query *query,
+				boolean condition,
+				enum pipe_render_cond_flag mode)
 {
-	struct r600_common_context *rctx = (struct r600_common_context *)ctx;
-	struct r600_query_hw *rquery = (struct r600_query_hw *)query;
-	struct r600_atom *atom = &rctx->render_cond_atom;
+	struct si_context *sctx = (struct si_context *)ctx;
+	struct si_query_hw *rquery = (struct si_query_hw *)query;
+	struct r600_atom *atom = &sctx->render_cond_atom;
 
 	if (query) {
 		bool needs_workaround = false;
@@ -1791,8 +1784,8 @@ static void r600_render_condition(struct pipe_context *ctx,
 		 * SET_PREDICATION packets to give the wrong answer for
 		 * non-inverted stream overflow predication.
 		 */
-		if (((rctx->chip_class == VI && rctx->screen->info.pfp_fw_feature < 49) ||
-		     (rctx->chip_class == GFX9 && rctx->screen->info.pfp_fw_feature < 38)) &&
+		if (((sctx->chip_class == VI && sctx->screen->info.pfp_fw_feature < 49) ||
+		     (sctx->chip_class == GFX9 && sctx->screen->info.pfp_fw_feature < 38)) &&
 		    !condition &&
 		    (rquery->b.type == PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE ||
 		     (rquery->b.type == PIPE_QUERY_SO_OVERFLOW_PREDICATE &&
@@ -1802,18 +1795,18 @@ static void r600_render_condition(struct pipe_context *ctx,
 		}
 
 		if (needs_workaround && !rquery->workaround_buf) {
-			bool old_force_off = rctx->render_cond_force_off;
-			rctx->render_cond_force_off = true;
+			bool old_force_off = sctx->render_cond_force_off;
+			sctx->render_cond_force_off = true;
 
 			u_suballocator_alloc(
-				rctx->allocator_zeroed_memory, 8, 8,
+				sctx->allocator_zeroed_memory, 8, 8,
 				&rquery->workaround_offset,
 				(struct pipe_resource **)&rquery->workaround_buf);
 
 			/* Reset to NULL to avoid a redundant SET_PREDICATION
 			 * from launching the compute grid.
 			 */
-			rctx->render_cond = NULL;
+			sctx->render_cond = NULL;
 
 			ctx->get_query_result_resource(
 				ctx, query, true, PIPE_QUERY_TYPE_U64, 0,
@@ -1821,72 +1814,48 @@ static void r600_render_condition(struct pipe_context *ctx,
 
 			/* Settings this in the render cond atom is too late,
 			 * so set it here. */
-			rctx->flags |= rctx->screen->barrier_flags.L2_to_cp |
+			sctx->flags |= sctx->screen->barrier_flags.L2_to_cp |
 				       SI_CONTEXT_FLUSH_FOR_RENDER_COND;
 
-			rctx->render_cond_force_off = old_force_off;
+			sctx->render_cond_force_off = old_force_off;
 		}
 	}
 
-	rctx->render_cond = query;
-	rctx->render_cond_invert = condition;
-	rctx->render_cond_mode = mode;
+	sctx->render_cond = query;
+	sctx->render_cond_invert = condition;
+	sctx->render_cond_mode = mode;
 
-	rctx->set_atom_dirty(rctx, atom, query != NULL);
+	si_set_atom_dirty(sctx, atom, query != NULL);
 }
 
-void si_suspend_queries(struct r600_common_context *ctx)
+void si_suspend_queries(struct si_context *sctx)
 {
-	struct r600_query_hw *query;
+	struct si_query_hw *query;
 
-	LIST_FOR_EACH_ENTRY(query, &ctx->active_queries, list) {
-		r600_query_hw_emit_stop(ctx, query);
+	LIST_FOR_EACH_ENTRY(query, &sctx->active_queries, list) {
+		si_query_hw_emit_stop(sctx, query);
 	}
-	assert(ctx->num_cs_dw_queries_suspend == 0);
+	assert(sctx->num_cs_dw_queries_suspend == 0);
 }
 
-static unsigned r600_queries_num_cs_dw_for_resuming(struct r600_common_context *ctx,
-						    struct list_head *query_list)
+void si_resume_queries(struct si_context *sctx)
 {
-	struct r600_query_hw *query;
-	unsigned num_dw = 0;
+	struct si_query_hw *query;
 
-	LIST_FOR_EACH_ENTRY(query, query_list, list) {
-		/* begin + end */
-		num_dw += query->num_cs_dw_begin + query->num_cs_dw_end;
-
-		/* Workaround for the fact that
-		 * num_cs_dw_nontimer_queries_suspend is incremented for every
-		 * resumed query, which raises the bar in need_cs_space for
-		 * queries about to be resumed.
-		 */
-		num_dw += query->num_cs_dw_end;
-	}
-	/* guess for ZPASS enable or PERFECT_ZPASS_COUNT enable updates */
-	num_dw += 13;
-
-	return num_dw;
-}
-
-void si_resume_queries(struct r600_common_context *ctx)
-{
-	struct r600_query_hw *query;
-	unsigned num_cs_dw = r600_queries_num_cs_dw_for_resuming(ctx, &ctx->active_queries);
-
-	assert(ctx->num_cs_dw_queries_suspend == 0);
+	assert(sctx->num_cs_dw_queries_suspend == 0);
 
 	/* Check CS space here. Resuming must not be interrupted by flushes. */
-	ctx->need_gfx_cs_space(&ctx->b, num_cs_dw, true);
+	si_need_gfx_cs_space(sctx);
 
-	LIST_FOR_EACH_ENTRY(query, &ctx->active_queries, list) {
-		r600_query_hw_emit_start(ctx, query);
+	LIST_FOR_EACH_ENTRY(query, &sctx->active_queries, list) {
+		si_query_hw_emit_start(sctx, query);
 	}
 }
 
 #define XFULL(name_, query_type_, type_, result_type_, group_id_) \
 	{ \
 		.name = name_, \
-		.query_type = R600_QUERY_##query_type_, \
+		.query_type = SI_QUERY_##query_type_, \
 		.type = PIPE_DRIVER_QUERY_TYPE_##type_, \
 		.result_type = PIPE_DRIVER_QUERY_RESULT_TYPE_##result_type_, \
 		.group_id = group_id_ \
@@ -1896,9 +1865,9 @@ void si_resume_queries(struct r600_common_context *ctx)
 	XFULL(name_, query_type_, type_, result_type_, ~(unsigned)0)
 
 #define XG(group_, name_, query_type_, type_, result_type_) \
-	XFULL(name_, query_type_, type_, result_type_, R600_QUERY_GROUP_##group_)
+	XFULL(name_, query_type_, type_, result_type_, SI_QUERY_GROUP_##group_)
 
-static struct pipe_driver_query_info r600_driver_query_list[] = {
+static struct pipe_driver_query_info si_driver_query_list[] = {
 	X("num-compilations",		NUM_COMPILATIONS,	UINT64, CUMULATIVE),
 	X("num-shaders-created",	NUM_SHADERS_CREATED,	UINT64, CUMULATIVE),
 	X("num-shader-cache-hits",	NUM_SHADER_CACHE_HITS,	UINT64, CUMULATIVE),
@@ -1986,26 +1955,26 @@ static struct pipe_driver_query_info r600_driver_query_list[] = {
 #undef XG
 #undef XFULL
 
-static unsigned r600_get_num_queries(struct si_screen *sscreen)
+static unsigned si_get_num_queries(struct si_screen *sscreen)
 {
 	if (sscreen->info.drm_major == 2 && sscreen->info.drm_minor >= 42)
-		return ARRAY_SIZE(r600_driver_query_list);
+		return ARRAY_SIZE(si_driver_query_list);
 	else if (sscreen->info.drm_major == 3) {
 		if (sscreen->info.chip_class >= VI)
-			return ARRAY_SIZE(r600_driver_query_list);
+			return ARRAY_SIZE(si_driver_query_list);
 		else
-			return ARRAY_SIZE(r600_driver_query_list) - 7;
+			return ARRAY_SIZE(si_driver_query_list) - 7;
 	}
 	else
-		return ARRAY_SIZE(r600_driver_query_list) - 25;
+		return ARRAY_SIZE(si_driver_query_list) - 25;
 }
 
-static int r600_get_driver_query_info(struct pipe_screen *screen,
-				      unsigned index,
-				      struct pipe_driver_query_info *info)
+static int si_get_driver_query_info(struct pipe_screen *screen,
+				    unsigned index,
+				    struct pipe_driver_query_info *info)
 {
 	struct si_screen *sscreen = (struct si_screen*)screen;
-	unsigned num_queries = r600_get_num_queries(sscreen);
+	unsigned num_queries = si_get_num_queries(sscreen);
 
 	if (!info) {
 		unsigned num_perfcounters =
@@ -2017,23 +1986,23 @@ static int r600_get_driver_query_info(struct pipe_screen *screen,
 	if (index >= num_queries)
 		return si_get_perfcounter_info(sscreen, index - num_queries, info);
 
-	*info = r600_driver_query_list[index];
+	*info = si_driver_query_list[index];
 
 	switch (info->query_type) {
-	case R600_QUERY_REQUESTED_VRAM:
-	case R600_QUERY_VRAM_USAGE:
-	case R600_QUERY_MAPPED_VRAM:
+	case SI_QUERY_REQUESTED_VRAM:
+	case SI_QUERY_VRAM_USAGE:
+	case SI_QUERY_MAPPED_VRAM:
 		info->max_value.u64 = sscreen->info.vram_size;
 		break;
-	case R600_QUERY_REQUESTED_GTT:
-	case R600_QUERY_GTT_USAGE:
-	case R600_QUERY_MAPPED_GTT:
+	case SI_QUERY_REQUESTED_GTT:
+	case SI_QUERY_GTT_USAGE:
+	case SI_QUERY_MAPPED_GTT:
 		info->max_value.u64 = sscreen->info.gart_size;
 		break;
-	case R600_QUERY_GPU_TEMPERATURE:
+	case SI_QUERY_GPU_TEMPERATURE:
 		info->max_value.u64 = 125;
 		break;
-	case R600_QUERY_VRAM_VIS_USAGE:
+	case SI_QUERY_VRAM_VIS_USAGE:
 		info->max_value.u64 = sscreen->info.vram_vis_size;
 		break;
 	}
@@ -2048,9 +2017,9 @@ static int r600_get_driver_query_info(struct pipe_screen *screen,
  * performance counter groups, so be careful when changing this and related
  * functions.
  */
-static int r600_get_driver_query_group_info(struct pipe_screen *screen,
-					    unsigned index,
-					    struct pipe_driver_query_group_info *info)
+static int si_get_driver_query_group_info(struct pipe_screen *screen,
+					  unsigned index,
+					  struct pipe_driver_query_group_info *info)
 {
 	struct si_screen *sscreen = (struct si_screen *)screen;
 	unsigned num_pc_groups = 0;
@@ -2059,13 +2028,13 @@ static int r600_get_driver_query_group_info(struct pipe_screen *screen,
 		num_pc_groups = sscreen->perfcounters->num_groups;
 
 	if (!info)
-		return num_pc_groups + R600_NUM_SW_QUERY_GROUPS;
+		return num_pc_groups + SI_NUM_SW_QUERY_GROUPS;
 
 	if (index < num_pc_groups)
 		return si_get_perfcounter_group_info(sscreen, index, info);
 
 	index -= num_pc_groups;
-	if (index >= R600_NUM_SW_QUERY_GROUPS)
+	if (index >= SI_NUM_SW_QUERY_GROUPS)
 		return 0;
 
 	info->name = "GPIN";
@@ -2074,25 +2043,25 @@ static int r600_get_driver_query_group_info(struct pipe_screen *screen,
 	return 1;
 }
 
-void si_init_query_functions(struct r600_common_context *rctx)
+void si_init_query_functions(struct si_context *sctx)
 {
-	rctx->b.create_query = r600_create_query;
-	rctx->b.create_batch_query = si_create_batch_query;
-	rctx->b.destroy_query = r600_destroy_query;
-	rctx->b.begin_query = r600_begin_query;
-	rctx->b.end_query = r600_end_query;
-	rctx->b.get_query_result = r600_get_query_result;
-	rctx->b.get_query_result_resource = r600_get_query_result_resource;
-	rctx->render_cond_atom.emit = r600_emit_query_predication;
+	sctx->b.create_query = si_create_query;
+	sctx->b.create_batch_query = si_create_batch_query;
+	sctx->b.destroy_query = si_destroy_query;
+	sctx->b.begin_query = si_begin_query;
+	sctx->b.end_query = si_end_query;
+	sctx->b.get_query_result = si_get_query_result;
+	sctx->b.get_query_result_resource = si_get_query_result_resource;
+	sctx->render_cond_atom.emit = si_emit_query_predication;
 
-	if (((struct si_screen*)rctx->b.screen)->info.num_render_backends > 0)
-	    rctx->b.render_condition = r600_render_condition;
+	if (((struct si_screen*)sctx->b.screen)->info.num_render_backends > 0)
+	    sctx->b.render_condition = si_render_condition;
 
-	LIST_INITHEAD(&rctx->active_queries);
+	LIST_INITHEAD(&sctx->active_queries);
 }
 
 void si_init_screen_query_functions(struct si_screen *sscreen)
 {
-	sscreen->b.get_driver_query_info = r600_get_driver_query_info;
-	sscreen->b.get_driver_query_group_info = r600_get_driver_query_group_info;
+	sscreen->b.get_driver_query_info = si_get_driver_query_info;
+	sscreen->b.get_driver_query_group_info = si_get_driver_query_group_info;
 }

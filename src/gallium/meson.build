@@ -24,10 +24,6 @@ inc_gallium_winsys = include_directories('winsys')
 
 subdir('auxiliary')
 subdir('auxiliary/pipe-loader')
-subdir('drivers/ddebug')
-subdir('drivers/noop')
-subdir('drivers/trace')
-subdir('drivers/rbug')
 subdir('winsys/sw/null')
 if with_dri
   subdir('winsys/sw/dri')
@@ -74,7 +70,6 @@ else
 endif
 if with_gallium_radeonsi
   subdir('winsys/amdgpu/drm')
-  subdir('drivers/radeon')
   subdir('drivers/radeonsi')
 else
   driver_radeonsi = declare_dependency()

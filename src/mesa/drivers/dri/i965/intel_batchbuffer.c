@@ -64,7 +64,7 @@ dump_validation_list(struct intel_batchbuffer *batch)
       uint64_t flags = batch->validation_list[i].flags;
       assert(batch->validation_list[i].handle ==
              batch->exec_bos[i]->gem_handle);
-      fprintf(stderr, "[%2d]: %2d %-14s %p %s%-7s @ 0x%016llu%s (%"PRIu64"B)\n",
+      fprintf(stderr, "[%2d]: %2d %-14s %p %s%-7s @ 0x%016llx%s (%"PRIu64"B)\n",
               i,
               batch->validation_list[i].handle,
               batch->exec_bos[i]->name,
@@ -1079,7 +1079,7 @@ brw_batch_references(struct intel_batchbuffer *batch, struct brw_bo *bo)
 static uint64_t
 emit_reloc(struct intel_batchbuffer *batch,
            struct brw_reloc_list *rlist, uint32_t offset,
-           struct brw_bo *target, uint32_t target_offset,
+           struct brw_bo *target, int32_t target_offset,
            unsigned int reloc_flags)
 {
    assert(target != NULL);

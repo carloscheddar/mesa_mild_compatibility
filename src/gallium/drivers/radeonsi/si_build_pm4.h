@@ -1,5 +1,6 @@
 /*
  * Copyright 2013 Advanced Micro Devices, Inc.
+ * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -25,91 +26,11 @@
  * This file contains helpers for writing commands to commands streams.
  */
 
-#ifndef R600_CS_H
-#define R600_CS_H
+#ifndef SI_BUILD_PM4_H
+#define SI_BUILD_PM4_H
 
-#include "radeonsi/si_pipe.h"
-#include "amd/common/sid.h"
-
-/**
- * Return true if there is enough memory in VRAM and GTT for the buffers
- * added so far.
- *
- * \param vram      VRAM memory size not added to the buffer list yet
- * \param gtt       GTT memory size not added to the buffer list yet
- */
-static inline bool
-radeon_cs_memory_below_limit(struct si_screen *screen,
-			     struct radeon_winsys_cs *cs,
-			     uint64_t vram, uint64_t gtt)
-{
-	vram += cs->used_vram;
-	gtt += cs->used_gart;
-
-	/* Anything that goes above the VRAM size should go to GTT. */
-	if (vram > screen->info.vram_size)
-		gtt += vram - screen->info.vram_size;
-
-	/* Now we just need to check if we have enough GTT. */
-	return gtt < screen->info.gart_size * 0.7;
-}
-
-/**
- * Add a buffer to the buffer list for the given command stream (CS).
- *
- * All buffers used by a CS must be added to the list. This tells the kernel
- * driver which buffers are used by GPU commands. Other buffers can
- * be swapped out (not accessible) during execution.
- *
- * The buffer list becomes empty after every context flush and must be
- * rebuilt.
- */
-static inline unsigned radeon_add_to_buffer_list(struct r600_common_context *rctx,
-						 struct r600_ring *ring,
-						 struct r600_resource *rbo,
-						 enum radeon_bo_usage usage,
-						 enum radeon_bo_priority priority)
-{
-	assert(usage);
-	return rctx->ws->cs_add_buffer(
-		ring->cs, rbo->buf,
-		(enum radeon_bo_usage)(usage | RADEON_USAGE_SYNCHRONIZED),
-		rbo->domains, priority) * 4;
-}
-
-/**
- * Same as above, but also checks memory usage and flushes the context
- * accordingly.
- *
- * When this SHOULD NOT be used:
- *
- * - if r600_context_add_resource_size has been called for the buffer
- *   followed by *_need_cs_space for checking the memory usage
- *
- * - if r600_need_dma_space has been called for the buffer
- *
- * - when emitting state packets and draw packets (because preceding packets
- *   can't be re-emitted at that point)
- *
- * - if shader resource "enabled_mask" is not up-to-date or there is
- *   a different constraint disallowing a context flush
- */
-static inline unsigned
-radeon_add_to_buffer_list_check_mem(struct r600_common_context *rctx,
-				    struct r600_ring *ring,
-				    struct r600_resource *rbo,
-				    enum radeon_bo_usage usage,
-				    enum radeon_bo_priority priority,
-				    bool check_mem)
-{
-	if (check_mem &&
-	    !radeon_cs_memory_below_limit(rctx->screen, ring->cs,
-					  rctx->vram + rbo->vram_usage,
-					  rctx->gtt + rbo->gart_usage))
-		ring->flush(rctx, PIPE_FLUSH_ASYNC, NULL);
-
-	return radeon_add_to_buffer_list(rctx, ring, rbo, usage, priority);
-}
+#include "si_pipe.h"
+#include "sid.h"
 
 static inline void radeon_set_config_reg_seq(struct radeon_winsys_cs *cs, unsigned reg, unsigned num)
 {
